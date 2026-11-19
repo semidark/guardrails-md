@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""guardrails-md pre-commit — bev judges the staged diff before it enters git.
+"""guardrails-md pre-commit — a self-hosted System One model judges the staged
+diff before it enters git.
 
-Blocks commits containing personal data (GDPR) or secrets. Fail-closed by
-default: if the endpoint is unreachable, the commit is blocked (retry, or
-SYSTEMONE_FAIL_OPEN=1 to prefer availability).
+Blocks commits containing personal data (GDPR) or secrets. Self-hosted only:
+SYSTEMONE_BASE_URL, SYSTEMONE_API_KEY and SYSTEMONE_MODEL must all be set —
+there is no vendor default. Missing configuration blocks the commit
+(fail-closed), as does an unreachable endpoint (SYSTEMONE_FAIL_OPEN=1 opts
+out of endpoint failures only).
 
-Config (env): BERGET_API_KEY, BERGET_BASE_URL (default api.berget.ai),
-BERGET_MODEL (default berget/bev-1), SYSTEMONE_THRESHOLD (default 0.7),
-SYSTEMONE_FAIL_OPEN=1, SYSTEMONE_LOG=1 (JSONL audit at ~/.cache/guardrails-md/pre-commit.log).
+Config (env): SYSTEMONE_BASE_URL, SYSTEMONE_API_KEY, SYSTEMONE_MODEL (all
+required), SYSTEMONE_THRESHOLD (default 0.7), SYSTEMONE_FAIL_OPEN=1,
+SYSTEMONE_GATE=off, SYSTEMONE_LOG=1 (JSONL audit at
+~/.cache/guardrails-md/pre-commit.log).
 """
 import json, os, subprocess, sys, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 THRESHOLD = float(os.environ.get("SYSTEMONE_THRESHOLD", "0.7"))
 FAIL_OPEN = os.environ.get("SYSTEMONE_FAIL_OPEN", "") == "1"
+BASE_URL = os.environ.get("SYSTEMONE_BASE_URL", "").strip()
+API_KEY = os.environ.get("SYSTEMONE_API_KEY", "").strip()
+MODEL = os.environ.get("SYSTEMONE_MODEL", "").strip()
 LOGFILE = os.path.join(
     os.environ.get("HOME", ""), ".cache", "guardrails-md", "pre-commit.log"
 )
@@ -22,7 +29,7 @@ DIFF_CAP = 12000
 QUESTIONS = {
     "personal_data": {
         "type": "noul",
-                "instructions": (
+        "instructions": (
             "Does this diff introduce personal data about people outside the "
             "team — customers, users, or other third parties — into the "
             "repository: for example a customer's name combined with a "
@@ -67,16 +74,16 @@ def staged_diff():
 
 def judge(diff):
     body = json.dumps({
-        "model": os.environ.get("BERGET_MODEL", "berget/bev-1"),
+        "model": MODEL,
         "state": {"text": "Staged changes about to be committed to the git repository:\n" + diff},
         "questions": QUESTIONS,
     })
     req = urllib.request.Request(
-        f"{os.environ.get('BERGET_BASE_URL', 'https://api.berget.ai')}/v1/systemone",
+        f"{BASE_URL}/v1/systemone",
         data=body.encode(),
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {os.environ.get('BERGET_API_KEY', '')}",
+            "Authorization": f"Bearer {API_KEY}",
         },
         method="POST",
     )
@@ -85,6 +92,28 @@ def judge(diff):
 
 
 def main():
+    if os.environ.get("SYSTEMONE_GATE", "") == "off":
+        sys.exit(0)
+
+    missing = [
+        name
+        for name, value in (
+            ("SYSTEMONE_BASE_URL", BASE_URL),
+            ("SYSTEMONE_API_KEY", API_KEY),
+            ("SYSTEMONE_MODEL", MODEL),
+        )
+        if not value
+    ]
+    if missing:
+        print(
+            "guardrails-md: not configured — " + ", ".join(missing) +
+            " missing; commit blocked (fail-closed).\n"
+            "  Point the hook at your self-hosted System One endpoint, or set "
+            "SYSTEMONE_GATE=off to disable it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     diff = staged_diff()
     if not diff.strip():
         sys.exit(0)  # nothing staged

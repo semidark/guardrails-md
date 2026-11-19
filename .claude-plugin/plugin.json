@@ -1,12 +1,12 @@
 {
   "name": "guardrails-md",
   "version": "0.8.0",
-  "description": "GUARDRAILS.md gate: a System One decision model judges every Bash command before it runs — destructive / credentials / GUARDRAILS.md policy",
+  "description": "GUARDRAILS.md gate: a self-hosted System One decision model judges every Bash command before it runs — destructive / credentials / GUARDRAILS.md policy. No vendor defaults: all traffic goes to your own endpoint.",
   "author": {
-    "name": "Berget AI"
+    "name": "semidark"
   },
-  "homepage": "https://github.com/berget-ai/guardrails-md#readme",
-  "repository": "https://github.com/berget-ai/guardrails-md",
+  "homepage": "https://github.com/semidark/guardrails-md#readme",
+  "repository": "https://github.com/semidark/guardrails-md",
   "license": "MIT",
   "keywords": [
     "claude-code",

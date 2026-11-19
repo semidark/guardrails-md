@@ -2,25 +2,28 @@
  * guardrails-md for Claude Code: a hooks module loaded in-process from
  * hooks/hooks.json. Self-contained: a hooks module runs without Node and
  * imports only files of the plugin, so it cannot share core.ts (node:fs,
- * the SDK). The questions, decision, block wording and cooldown below are
+ * fetch). The questions, decision, block wording and cooldown below are
  * the same as core.ts's; keep the two in step when editing either.
  *
  * session.start snapshots GUARDRAILS.md (then .claude/GUARDRAILS.md, then the
- * legacy lowercase files), the
- * session root and every variable below; it fires once per session and not
- * on compaction, and a missing snapshot denies. tool.call judges Bash, and
- * Monitor when it runs a shell `command`, and deterministically refuses
- * Edit, Write and NotebookEdit on protected paths — no model call, no
- * threshold, no cooldown — answering { deny } on a block.
+ * legacy lowercase files), the session root and every variable below; it fires
+ * once per session and not on compaction, and a missing snapshot denies.
+ * tool.call judges Bash, and Monitor when it runs a shell `command`, and
+ * deterministically refuses Edit, Write and NotebookEdit on protected paths —
+ * no model call, no threshold, no cooldown — answering { deny } on a block.
  *
  * Fail-closed: the engine skips a hook that throws or overruns and lets the
  * call through, so .catch denies instead. The endpoint call is raced
  * against a 5 s $.clock.sleep, as the SDK times out in opencode and pi:
  * waiting on $.http.fetch does not count against the hook's budget.
  *
- * Credentials: BERGET_API_KEY, then TYPESAFE_API_KEY (no Berget seat token
- * here). Cooldown: module memory, for the session. No audit log: $.fs
- * cannot append.
+ * Self-hosted only — no vendor defaults: SYSTEMONE_BASE_URL, SYSTEMONE_API_KEY
+ * and SYSTEMONE_MODEL must all be set, or every Bash command is denied
+ * (fail-closed) and no request is made. SYSTEMONE_FAIL_OPEN=1 covers transient
+ * endpoint errors only, never missing configuration. The escalating cooldown
+ * is opt-in: SYSTEMONE_COOLDOWN=1.
+ *
+ * No audit log: $.fs cannot append.
  */
 import type { Register } from "claude-code"
 
@@ -102,7 +105,7 @@ type Verdict = {
   policy_exception?: number
 }
 
-// The SDK's noul(), inlined: the same wire JSON without a package import.
+// The noul question shape, inlined: the same wire JSON without a package import.
 function noul(instructions: string) {
   return { type: "noul" as const, instructions }
 }
@@ -241,8 +244,8 @@ function blockMessage(outcome: Outcome, hasGuardrails: boolean, threshold: numbe
 }
 
 function endpointReason(status: number | undefined): string {
-  if (status === 402) return "Berget account out of credit — top up at berget.ai"
-  if (status === 401) return "authentication failed — re-login to Berget or check BERGET_API_KEY"
+  if (status === 401) return "authentication failed — check SYSTEMONE_API_KEY"
+  if (status === 402) return "the endpoint refused the request: payment required (402)"
   if (status === 429) return "rate limited — wait a moment and retry"
   return "endpoint unreachable"
 }
@@ -256,13 +259,22 @@ function endpointFailure(command: string, err: unknown): string {
   )
 }
 
+function notConfigured(missing: string[]): string {
+  return (
+    `SystemOne-gate: not configured — ${missing.join(", ")} missing. Command blocked (fail-closed).\n` +
+    `  Point the gate at your self-hosted System One endpoint: set SYSTEMONE_BASE_URL,\n` +
+    `  SYSTEMONE_API_KEY and SYSTEMONE_MODEL, then restart ${HARNESS}.\n` +
+    `  To disable the gate entirely, restart ${HARNESS} with SYSTEMONE_GATE=off.`
+  )
+}
+
 // --- cooldown ---------------------------------------------------------------
-// Circumvention cooldown: every block doubles the wait before the next
-// command is judged — 10 ms, 20 ms, 40 ms … with no ceiling. The first
-// nine blocks are imperceptible (a few false positives cost nothing);
-// the first noticeable pause arrives around block ten (5 s), and by
-// block twenty an attempt waits 1.5 h, by block twenty-five almost two
-// days: brute-forcing variants past the gate is arithmetically hopeless.
+// Circumvention cooldown (opt-in, SYSTEMONE_COOLDOWN=1): every block doubles
+// the wait before the next command is judged — 10 ms, 20 ms, 40 ms … with no
+// ceiling. The first nine blocks are imperceptible (a few false positives
+// cost nothing); the first noticeable pause arrives around block ten (5 s),
+// and by block twenty an attempt waits 1.5 h, by block twenty-five almost
+// two days: brute-forcing variants past the gate is arithmetically hopeless.
 //
 // The wait is enforced as a visible cooldown block, not a silent sleep —
 // an invisible hang looks like a crash, while the reason tells the agent
@@ -425,11 +437,13 @@ async function place(
 
 interface Session {
   guardrails: string | null
-  key: string | undefined
+  key: string
   baseURL: string
   model: string
+  missing: string[]
   threshold: number
   failOpen: boolean
+  cooldownEnabled: boolean
   off: boolean
   cwd: string
   root: string
@@ -463,22 +477,33 @@ export const register: Register = (on) => {
     const guardrails = raw === null ? null : truncateGuardrails(raw)
     const rootStat = await $.fs.stat(e.cwd, { resolve: true }).catch(() => undefined)
     const threshold = parseThreshold(await $.env.get("SYSTEMONE_THRESHOLD"))
+    const baseURLRaw = (await $.env.get("SYSTEMONE_BASE_URL")) ?? ""
+    const key = (await $.env.get("SYSTEMONE_API_KEY")) ?? ""
+    const model = (await $.env.get("SYSTEMONE_MODEL")) ?? ""
+    const missing: string[] = []
+    if (!baseURLRaw.trim()) missing.push("SYSTEMONE_BASE_URL")
+    if (!key.trim()) missing.push("SYSTEMONE_API_KEY")
+    if (!model.trim()) missing.push("SYSTEMONE_MODEL")
     session = {
       cwd: e.cwd,
       root: rootStat?.realPath && rootStat.realPath !== "" ? rootStat.realPath : e.cwd,
       guardrails,
-      key: (await $.env.get("BERGET_API_KEY")) ?? (await $.env.get("TYPESAFE_API_KEY")),
-      baseURL: gatewayRoot((await $.env.get("BERGET_BASE_URL")) ?? (await $.env.get("TYPESAFE_BASE_URL")) ?? "https://api.berget.ai"),
-      model: (await $.env.get("BERGET_MODEL")) ?? (await $.env.get("TYPESAFE_DEFAULT_MODEL")) ?? "berget/bev",
+      key,
+      baseURL: gatewayRoot(baseURLRaw),
+      model,
+      missing,
       threshold: threshold.value,
       failOpen: isEnabled(await $.env.get("SYSTEMONE_FAIL_OPEN")),
+      cooldownEnabled: isEnabled(await $.env.get("SYSTEMONE_COOLDOWN")),
       off: (await $.env.get("SYSTEMONE_GATE")) === "off",
       warnings: [threshold.warning, truncationWarning(guardrails)].filter((w): w is string => w !== undefined),
       cooldown: createCooldown(),
     }
     for (const warning of session.warnings) $.ui.toast(warning)
-    if (!session.off && !session.key) {
-      $.ui.toast("guardrails-md inactive: no BERGET_API_KEY or TYPESAFE_API_KEY — Bash and Monitor commands run ungated this session")
+    if (!session.off && missing.length > 0) {
+      $.ui.toast(
+        `guardrails-md: not configured — ${missing.join(", ")} missing. Every Bash command will be blocked (fail-closed).`,
+      )
     }
     return next(e)
   })
@@ -488,10 +513,16 @@ export const register: Register = (on) => {
     if (!session) return { deny: "SystemOne-gate: no frozen policy — session.start did not run. Restart Claude Code (fail-closed)." }
     const s = session
     const command = e.command.trim()
-    if (s.off || !s.key || !command) return next(e)
-    const cooling = s.cooldown.reason()
-    if (cooling) return { deny: cooling }
+    if (s.off || !command) return next(e)
     const deny = (reason: string) => ({ deny: [reason, ...s.warnings.map((w) => `  ${w}`)].join("\n") })
+    // No endpoint, no pass. Missing configuration is an operator error, not
+    // a transient failure, so FAIL_OPEN does not cover it: without a fully
+    // configured self-hosted endpoint nothing is judged and nothing is sent.
+    if (s.missing.length > 0) return deny(notConfigured(s.missing))
+    if (s.cooldownEnabled) {
+      const cooling = s.cooldown.reason()
+      if (cooling) return { deny: cooling }
+    }
 
     const scripts: string[] = []
     for (const token of command.split(/\s+/)) {
@@ -536,7 +567,7 @@ export const register: Register = (on) => {
 
     const outcome = decide(verdictFrom(answers), !!s.guardrails, s.threshold)
     if (outcome.decision === "allow") return next(e)
-    s.cooldown.register()
+    if (s.cooldownEnabled) s.cooldown.register()
     return deny(blockMessage(outcome, !!s.guardrails, s.threshold) + `\n  ${command.slice(0, 200)}`)
   }).catch(($, e, next) => ({
     deny: `SystemOne-gate: the gate failed (${next.error.kind}${next.error.message ? `: ${next.error.message}` : ""}) — command blocked (fail-closed).`,

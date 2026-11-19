@@ -3,6 +3,8 @@ import { describe, expect, mock, test, type Engine } from "claude-code/testing"
 
 const CWD = "/repo"
 const POLICY = "MUST NOT delete ./data"
+const ENDPOINT = "http://model.lan:8081"
+const CONFIG = { SYSTEMONE_BASE_URL: ENDPOINT, SYSTEMONE_API_KEY: "k", SYSTEMONE_MODEL: "test-model" }
 const allow = { answers: { destructive: { noul: 0.01 }, credentials: { noul: 0 } } }
 const destructive = { answers: { destructive: { noul: 0.98 }, credentials: { noul: 0 } } }
 
@@ -16,7 +18,7 @@ interface World {
 
 const hang = () => new Promise<never>(() => {})
 
-function world(on: On, { env = { BERGET_API_KEY: "k" }, files = {}, links = {}, dangling = [], answer = () => ({ status: 200, body: allow }) }: World) {
+function world(on: On, { env = { ...CONFIG }, files = {}, links = {}, dangling = [], answer = () => ({ status: 200, body: allow }) }: World) {
   const fetches: { url: string; headers: Record<string, string>; body: string }[] = []
   const toasts: string[] = []
   const ran: string[] = []
@@ -82,10 +84,10 @@ describe("guardrails-md mod", () => {
     const out = await bash($, "ls")
     expect(out.deny).toBeUndefined()
     expect(w.ran).toEqual(["ls"])
-    expect(w.fetches[0].url).toBe("https://api.berget.ai/v1/systemone")
+    expect(w.fetches[0].url).toBe(`${ENDPOINT}/v1/systemone`)
     expect(w.fetches[0].headers.Authorization).toBe("Bearer k")
     const body = JSON.parse(w.fetches[0].body)
-    expect(body.model).toBe("berget/bev")
+    expect(body.model).toBe("test-model")
     expect(body.state.text).toContain(POLICY)
     expect(body.questions.destructive.type).toBe("noul")
   })
@@ -113,17 +115,18 @@ describe("guardrails-md mod", () => {
     expect(w.ran).toEqual([])
   })
 
-  test("Given no credential, When the session starts and Bash runs, Then the human is warned and the gate is inactive", async ($, on) => {
+  test("Given no configuration, When the session starts and Bash runs, Then the human is warned and the command is denied fail-closed", async ($, on) => {
     const w = world(on, { env: {} })
     await start($)
-    await bash($, "rm -rf ./data")
-    expect(w.toasts.join("\n")).toContain("guardrails-md inactive")
+    const out = await bash($, "rm -rf ./data")
+    expect(w.toasts.join("\n")).toContain("not configured")
+    expect(out.deny).toContain("not configured — SYSTEMONE_BASE_URL, SYSTEMONE_API_KEY, SYSTEMONE_MODEL missing")
     expect(w.fetches).toEqual([])
-    expect(w.ran).toEqual(["rm -rf ./data"])
+    expect(w.ran).toEqual([])
   })
 
-  test("Given a blocked command, When the next command follows at once, Then the cooldown denies it unjudged", async ($, on) => {
-    const w = world(on, { env: { BERGET_API_KEY: "k" }, answer: () => ({ status: 200, body: destructive }) })
+  test("Given a blocked command with the cooldown on, When the next command follows at once, Then the cooldown denies it unjudged", async ($, on) => {
+    const w = world(on, { env: { ...CONFIG, SYSTEMONE_COOLDOWN: "1" }, answer: () => ({ status: 200, body: destructive }) })
     await start($)
     for (let i = 0; i < 10; i++) await bash($, "rm -rf ./data")
     const judged = w.fetches.length
@@ -131,6 +134,15 @@ describe("guardrails-md mod", () => {
     expect(out.deny).toContain("cooling down")
     expect(w.fetches.length).toBe(judged)
     expect(w.ran).toEqual([])
+  })
+
+  test("Given a blocked command with the cooldown off (default), When the next command follows at once, Then it is judged immediately", async ($, on) => {
+    const w = world(on, { answer: () => ({ status: 200, body: destructive }) })
+    await start($)
+    await bash($, "rm -rf ./data")
+    const judged = w.fetches.length
+    await bash($, "ls")
+    expect(w.fetches.length).toBe(judged + 1)
   })
 
   test("Given the fetch is refused, When Bash runs, Then the call is denied fail-closed", async ($, on) => {
@@ -141,11 +153,11 @@ describe("guardrails-md mod", () => {
     expect(w.ran).toEqual([])
   })
 
-  test("Given the endpoint answers 402, When Bash runs, Then the denial names the credit problem", async ($, on) => {
-    world(on, { answer: () => ({ status: 402, body: { error: "no credit" } }) })
+  test("Given the endpoint answers 402, When Bash runs, Then the denial names the refusal", async ($, on) => {
+    world(on, { answer: () => ({ status: 402, body: { error: "payment required" } }) })
     await start($)
     const out = await bash($, "ls")
-    expect(out.deny).toContain("out of credit")
+    expect(out.deny).toContain("payment required")
   })
 
   test("Given a hung endpoint, When 5 s pass, Then the call is denied as unreachable", async ($, on) => {
@@ -203,7 +215,7 @@ describe("guardrails-md mod", () => {
   })
 
   test("Given SYSTEMONE_GATE=off, When Bash runs, Then nothing is judged", async ($, on) => {
-    const w = world(on, { env: { BERGET_API_KEY: "k", SYSTEMONE_GATE: "off" } })
+    const w = world(on, { env: { ...CONFIG, SYSTEMONE_GATE: "off" } })
     await start($)
     await bash($, "rm -rf ./data")
     expect(w.fetches).toEqual([])
@@ -269,7 +281,7 @@ describe("guardrails-md mod", () => {
     expect(w.ran).toEqual([`${CWD}/src/a.ts`])
   })
 
-  test("Given no credential and an Edit on guardrails.md, When the path is protected, Then the call is still denied", async ($, on) => {
+  test("Given no configuration and an Edit on guardrails.md, When the path is protected, Then the call is still denied", async ($, on) => {
     const w = world(on, { env: {}, files: { [`${CWD}/guardrails.md`]: POLICY } })
     await start($)
     const out = await $.tool.call({ tool: "Edit", file_path: `${CWD}/guardrails.md`, old_string: "a", new_string: "b" })
@@ -278,7 +290,7 @@ describe("guardrails-md mod", () => {
   })
 
   test("Given a Write to Guardrails.MD, When the protected file is spelled in another case, Then the call is denied", async ($, on) => {
-    const w = world(on, { env: { BERGET_API_KEY: "k" }, files: { [`${CWD}/guardrails.md`]: POLICY } })
+    const w = world(on, { env: { ...CONFIG }, files: { [`${CWD}/guardrails.md`]: POLICY } })
     await start($)
     const out = await $.tool.call({ tool: "Write", file_path: `${CWD}/Guardrails.MD`, content: "new" })
     expect(out.deny).toContain("SystemOne-gate: protected file — GUARDRAILS.md")
@@ -286,7 +298,7 @@ describe("guardrails-md mod", () => {
   })
 
   test("Given SYSTEMONE_GATE=off and an Edit on guardrails.md, When the path guard is off, Then the tool runs", async ($, on) => {
-    const w = world(on, { env: { BERGET_API_KEY: "k", SYSTEMONE_GATE: "off" }, files: { [`${CWD}/guardrails.md`]: POLICY } })
+    const w = world(on, { env: { ...CONFIG, SYSTEMONE_GATE: "off" }, files: { [`${CWD}/guardrails.md`]: POLICY } })
     await start($)
     const out = await $.tool.call({ tool: "Edit", file_path: `${CWD}/guardrails.md`, old_string: "a", new_string: "b" })
     expect(out.deny).toBeUndefined()

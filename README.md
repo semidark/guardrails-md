@@ -19,6 +19,71 @@ for a session that needs it. The agent must not edit GUARDRAILS.md
 to work around this.
 ```
 
+## This fork: self-hosted only, no vendor traffic
+
+This is a fork of [berget-ai/guardrails-md](https://github.com/berget-ai/guardrails-md)
+hardened for a single operator requirement: **every judgment request goes to
+your own self-hosted System One-compatible model and nowhere else.**
+
+What changed compared to upstream:
+
+- **No vendor defaults.** `SYSTEMONE_BASE_URL`, `SYSTEMONE_API_KEY` and
+  `SYSTEMONE_MODEL` are required. There is no fallback URL anywhere in the
+  codebase — unset means every command is blocked (fail-closed), nothing is
+  sent anywhere.
+- **No vendor SDK.** The `@typesafe-ai/sdk` dependency is gone; the wire
+  contract is a plain `fetch` in `core.ts` (and `$.http.fetch` in the
+  Claude Code hooks module). No third-party code can redirect your traffic.
+- **No seat tokens.** The Berget OAuth / harness `auth.json` reading is
+  removed. One key, one endpoint, configured by you.
+- **Missing configuration fails closed.** A half-configured gate blocks
+  commands instead of silently going inactive. `SYSTEMONE_FAIL_OPEN=1`
+  covers transient endpoint errors only — never missing config.
+- **The escalating cooldown is opt-in** (`SYSTEMONE_COOLDOWN=1`); off by
+  default.
+- A test (`package.test.ts`) fails the build if any production file ever
+  references a vendor host, SDK or env var again.
+
+### Endpoint setup
+
+Point the gate at your model and give it a key:
+
+```sh
+export SYSTEMONE_BASE_URL=http://llama-cpp.internal:8081   # required
+export SYSTEMONE_API_KEY=sk-…                        # required
+export SYSTEMONE_MODEL=your-model-name               # required
+```
+
+The gate `POST`s to `<SYSTEMONE_BASE_URL>/v1/systemone` with:
+
+```json
+{
+  "state": { "text": "Command the agent wants to run:\n<command>…" },
+  "questions": {
+    "destructive": { "type": "noul", "instructions": "…" },
+    "credentials": { "type": "noul", "instructions": "…" }
+  },
+  "model": "<SYSTEMONE_MODEL>"
+}
+```
+
+and expects back:
+
+```json
+{ "answers": { "destructive": { "noul": 0.01 }, "credentials": { "noul": 0.0 } } }
+```
+
+When a `GUARDRAILS.md` exists, two more questions
+(`guardrails_violation`, `policy_exception`) are added and answered in the
+same pass. Test your endpoint with:
+
+```sh
+curl -s "$SYSTEMONE_BASE_URL/v1/systemone" \
+  -H "Authorization: Bearer $SYSTEMONE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"state":{"text":"Command the agent wants to run:\nrm -rf /backup"},"questions":{"destructive":{"type":"noul","instructions":"Does this command irreversibly destroy data?"}},"model":"'"$SYSTEMONE_MODEL"'"}'
+```
+
 ## When it helps
 
 Two situations where a pattern list leaves you exposed.
@@ -82,16 +147,17 @@ warns you in every block message and, except on opencode 2, also at startup.
 The rules after the cut are not applied.
 See [`guardrails.example.md`](guardrails.example.md) — copy it to `GUARDRAILS.md`.
 
-**2. Install the gate in your harness.**
+**2. Install the gate in your harness.** This fork is not published to npm;
+install it from a local clone or a git URL.
 
 ### opencode
 
-Add the plugin to `opencode.json` (global or per project). opencode 2 reads
-the `plugins` key:
+Add the plugin to `opencode.json` (global or per project). From a local
+clone, point at the adapter path; opencode 2 reads the `plugins` key:
 
 ```json
 {
-  "plugins": ["@bergetai/guardrails-md"]
+  "plugins": ["/home/you/src/guardrails-md/adapters/opencode.ts"]
 }
 ```
 
@@ -99,68 +165,52 @@ opencode 1.x reads `plugin` instead:
 
 ```json
 {
-  "plugin": ["@bergetai/guardrails-md"]
+  "plugin": ["/home/you/src/guardrails-md/adapters/opencode.ts"]
 }
 ```
 
-The package supports opencode 1.18.29 and newer, including 2.x. Older 1.x
-releases cannot load it. opencode 2 does not report a plugin that fails to load,
-so after an upgrade check that `opencode plugin list` shows
-`@bergetai/guardrails-md`.
-
-The package was called `@bergetai/opencode-guardrails-md` up to 0.5.1. That
-name is deprecated; replace it with `@bergetai/guardrails-md` in your config.
+The plugin has no runtime dependencies, so a plain clone is enough — no
+`npm install` needed.
 
 ### pi
 
-Install the same package from npm (add `-l` to install it for the
-current project only):
+From the cloned repo:
 
 ```sh
-pi install npm:@bergetai/guardrails-md
+pi install /home/you/src/guardrails-md
 ```
-
-To run pi from a clone instead, use `pi install ./` in the cloned repo after
-`npm install`.
 
 ### Claude Code
 
-Install from this repo's marketplace, at the prompt of a running session:
+Load the plugin directory at the prompt of a running session:
 
 ```
-/plugin install guardrails-md --marketplace berget-ai/guardrails-md
+/plugin install guardrails-md --marketplace /home/you/src/guardrails-md
 ```
 
-Answer `y` to add the marketplace, then pick a scope; the user scope loads
-it in every session from then on. It is a hooks module that Claude Code
-loads in-process from `hooks/hooks.json`, so there is no build step and no
-`npm install`. To run it from a clone for one session instead, use
-`claude --plugin-dir ./guardrails-md`.
+Or for one session: `claude --plugin-dir /home/you/src/guardrails-md`.
+It is a hooks module that Claude Code loads in-process from
+`hooks/hooks.json`, so there is no build step and no `npm install`.
 
-Hooks modules are an early-access Claude Code API (checked on 2.1.291);
-the engine may change them between releases. Claude Code has no Berget seat
-token — set `BERGET_API_KEY` (below) for this harness.
+Hooks modules are an early-access Claude Code API; the engine may change
+them between releases.
 
-### API key
+### Endpoint and key
 
-Set a key and restart the harness (plugins and extensions load at startup):
+Set the three required variables (see [Endpoint setup](#endpoint-setup))
+and restart the harness — plugins and extensions load at startup:
 
 ```sh
-export BERGET_API_KEY=…
+export SYSTEMONE_BASE_URL=http://llama-cpp.internal:8081
+export SYSTEMONE_API_KEY=sk-…
+export SYSTEMONE_MODEL=your-model-name
 ```
-
-Keys come from [berget.ai](https://berget.ai). The free tier includes €5 of
-credit, and a gate call is small enough that it lasts a long time. If you
-are logged in to Berget in your harness (`@bergetai/opencode-auth` in opencode
-1.x, `/login` in pi), skip the key: the gate picks up your seat token. opencode
-2 does not refresh that token. One left behind by 1.x is still used until it
-expires, and after that the gate goes inactive without a warning. Set the key
-on opencode 2. If you run your own
-System One-compatible endpoint, point `BERGET_BASE_URL` at it instead.
 
 From now on, every bash command your agent runs has to pass your guardrails
 before it is allowed. Above the threshold the command is blocked with an
-explanation the agent can read; below it, it runs.
+explanation the agent can read; below it, it runs. With any of the three
+variables missing, every command is blocked (fail-closed) and nothing is
+sent.
 
 ## Git pre-commit hook
 
@@ -168,12 +218,11 @@ The same judgement works as a git pre-commit hook: every commit's staged
 diff is scored before it enters the repository. Personal data (GDPR) and
 secrets are blocked; the team's own names in bylines and author fields pass.
 
-Install for every repo on your machine (uses your global `core.hooksPath` if
-you have one, otherwise copy to `.git/hooks/pre-commit` per repo):
+Install from your clone (uses your global `core.hooksPath` if you have one,
+otherwise copy to `.git/hooks/pre-commit` per repo):
 
 ```sh
-curl -o ~/.git-hooks/guardrails-pre-commit \
-  https://raw.githubusercontent.com/berget-ai/guardrails-md/main/hooks/pre-commit
+cp /home/you/src/guardrails-md/hooks/pre-commit ~/.git-hooks/guardrails-pre-commit
 chmod +x ~/.git-hooks/guardrails-pre-commit
 ```
 
@@ -184,8 +233,9 @@ Then chain it from your global pre-commit hook (or create one):
 python3 ~/.git-hooks/guardrails-pre-commit || exit 1
 ```
 
-Same env config as the plugin. Fail-closed by default: if the endpoint is
-unreachable the commit is blocked — retry, or set `SYSTEMONE_FAIL_OPEN=1`.
+Same env config as the plugin. Fail-closed by default: missing configuration
+or an unreachable endpoint blocks the commit — retry, or set
+`SYSTEMONE_FAIL_OPEN=1` for endpoint failures.
 
 ## Why a model and not a regex
 
@@ -194,9 +244,9 @@ forbids pushing to `main` but allows feature branches, or that `kubectl get`
 is fine in prod while `kubectl apply` is not. Asking a second LLM to review
 each command does know that, at the price of a full generation per command.
 
-[System One](https://docs.typesafe.ai) is a decision model: it reads the command plus
-your written rules and returns scores for a fixed set of questions in a
-single forward pass. That makes two things possible.
+A System One decision model reads the command plus your written rules and
+returns scores for a fixed set of questions in a single forward pass. That
+makes two things possible.
 
 The gate follows your policy. With the example guardrails below,
 `git push origin HEAD:main` is a violation and `git push origin feature/x`
@@ -206,28 +256,8 @@ It also catches what the driving model shrugs at. An agent that prints a
 `.env` file to "check the config" sees a harmless read. The gate sees
 credentials leaving the file.
 
-## How well it judges
-
-berget/bev is fine-tuned on 221,759 judged decisions from real operations
-traffic — privacy and risk calls, memory decisions, routing, evasion
-attempts — with labels validated by a stronger model and human review.
-Held-out accuracy, against the base model it is built on:
-
-| Test | What it measures | Base model | berget/bev |
-|---|---|---|---|
-| Risk (16,902 questions) | credentials and destructive content in ops text | 93.5% | **97.0%** |
-| Memory (7,456) | what is worth remembering | 64.6% | **90.7%** |
-| Router (5,679) | routing decisions | 27.3% | **74.4%** |
-| Evasion holdout (90) | evasion attempts never seen in training | 65.6% | **93.3%** |
-| EU risk (43) | EU AI Act risk classification | 70% | **95%** |
-| Red team (34) | adversarial commands | 53% | **74%** |
-| Jev bench (1,200) | general Jev questions, outside our domain | 80.6% | **82.8%** |
-
-Read the table with two caveats. The test splits come from the same
-corpora as training, so they measure fit to this kind of traffic, not
-performance on your traffic. And the weakest rows are the honest ones:
-adversarial commands sit at 74%, which is why the gate is one layer and
-not the whole defense.
+Judgment quality is entirely a property of the model you host — run your
+own evals against your own traffic before trusting it.
 
 ## What it asks
 
@@ -319,14 +349,13 @@ unattended agents should treat the file as untrusted input. Your overrides:
 
 ## Disclaimer
 
-The gate is a trained model, not a deterministic rule engine. berget/bev
-scores around 96% on our held-out test sets — high, but not 100%, and it
-will occasionally judge a command wrong in both directions: blocking
-something safe, or letting something risky through. Berget provides the
-gate as a tool, not a guarantee, and accepts no liability for decisions it
-gets wrong or for damage done by commands it let pass. Keep the override
-and audit paths, and treat the gate as one layer among several — scoped
-credentials, sandboxes and human review still matter.
+The gate is a trained model, not a deterministic rule engine. It will
+occasionally judge a command wrong in both directions: blocking something
+safe, or letting something risky through. This software is provided as a
+tool, not a guarantee, and accepts no liability for decisions it gets wrong
+or for damage done by commands it let pass. Keep the override and audit
+paths, and treat the gate as one layer among several — scoped credentials,
+sandboxes and human review still matter.
 
 ## What it doesn't do
 
@@ -345,27 +374,26 @@ credentials, sandboxes and human review still matter.
   access can still be creative. This is one layer, not a sandbox.
 - It fails closed. If the endpoint is unreachable the command is blocked
   until the endpoint responds again. That is deliberate: with fail-open, an
-  agent could induce the failure itself — hammer the endpoint until it is
-  rate-limited, or drain the account quota — and then run anything
-  unchecked. Transient hiccups are absorbed by the SDK's retries with
-  backoff; a persistent failure blocks, and the agent relays the error.
-  Interactive users who prefer availability can set
-  `SYSTEMONE_FAIL_OPEN=1`, knowingly.
-- It sends every command to the endpoint to be judged. Berget
-  has a zero data retention policy and operates under EU data protection
-  law, so a command that contains something sensitive is scored and not
-  stored. If you would still rather keep it in-house, run your own endpoint.
+  agent could induce the failure itself and then run anything unchecked.
+  Each call gets one attempt with a 5 s timeout; a persistent failure
+  blocks, and the agent relays the error. Interactive users who prefer
+  availability can set `SYSTEMONE_FAIL_OPEN=1`, knowingly. Missing
+  configuration is never fail-open — it always blocks.
+- It sends every command to your endpoint to be judged. That is the whole
+  mechanism — keep the endpoint on infrastructure you control. In this
+  fork there is no other destination: no vendor URL, no vendor SDK, no
+  seat-token plumbing.
 - It is one layer. The driving model's own refusals are another, and neither
   replaces scoped credentials or a sandbox.
 - Earlier versions read an override file at
   `~/.cache/opencode/systemone-gate.allow`. That mechanism is removed — the
   agent could write the file itself — and the file is now ignored.
 - It does not decode obfuscated payloads. A command like
-  `echo <base64> | base64 -d | sh` is judged on its visible text, and in our
-  testing an encoded `rm -rf` inside a base64 blob scored as harmless.
-  Direct instruction injection aimed at the model — "ignore previous
-  instructions", fake JSON answers, authority claims, prompts in other
-  languages — did not move the verdict in any of eight tested cases, but
+  `echo <base64> | base64 -d | sh` is judged on its visible text, and in
+  upstream testing an encoded `rm -rf` inside a base64 blob scored as
+  harmless. Direct instruction injection aimed at the model — "ignore
+  previous instructions", fake JSON answers, authority claims, prompts in
+  other languages — did not move the verdict in upstream testing, but
   encoding is a real gap. If your agents run untrusted input, treat encoded
   pipelines as blocked territory in `GUARDRAILS.md`.
 
@@ -373,27 +401,27 @@ credentials, sandboxes and human review still matter.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| (seat token) | auto | Berget seat auth from the harness's login (see [Harness differences](#harness-differences)) |
-| `BERGET_API_KEY` | – | Bearer token for CI/headless (fallback: `TYPESAFE_API_KEY`) |
-| `BERGET_BASE_URL` | `https://api.berget.ai` | Gateway root or full `/v1/systemone` URL (fallback: `TYPESAFE_BASE_URL`) |
-| `BERGET_MODEL` | `berget/bev` | Model id as exposed by the gateway (fallback: `TYPESAFE_DEFAULT_MODEL`) |
+| `SYSTEMONE_BASE_URL` | **required** | Your System One gateway root or full `/v1/systemone` URL. No vendor fallback — unset blocks everything |
+| `SYSTEMONE_API_KEY` | **required** | Bearer token for your endpoint. Unset blocks everything |
+| `SYSTEMONE_MODEL` | **required** | Model id as exposed by your gateway. Unset blocks everything |
 | `SYSTEMONE_THRESHOLD` | `0.7` | Block threshold, strictly between 0 and 1. Anything else (`abc`, empty, `0`, `1`, …) falls back to `0.7` with a warning |
-| `SYSTEMONE_FAIL_OPEN` | – | Set to `1` to let commands run when the endpoint is unreachable (default is fail-closed) |
+| `SYSTEMONE_FAIL_OPEN` | – | Set to `1` to let commands run when the endpoint is unreachable (default is fail-closed; missing config always blocks) |
 | `SYSTEMONE_GATE` | – | Set to `off` to disable the gate |
+| `SYSTEMONE_COOLDOWN` | – | Set to `1` to enable the escalating circumvention cooldown (off by default) |
 | `SYSTEMONE_LOG` | – | Set to `1` to write the audit log |
 
-Credentials resolve per request: seat token, then `BERGET_API_KEY`, then
-`TYPESAFE_API_KEY`. With no credential at all the gate logs one line and
-stays inactive.
+With any required variable missing the gate blocks every command with a
+`not configured` reason and sends nothing.
 
-## Circumvention slows itself down
+## Circumvention slows itself down (opt-in)
 
-Every block doubles the wait before the next command is judged: 10 ms,
-20 ms, 40 ms … with no ceiling. The first nine blocks are imperceptible —
-a few false positives cost nothing. The first noticeable pause arrives
-around block ten (5 s), by block twenty an attempt waits 1.5 hours, by
-block twenty-five almost two days. An agent shopping for variants past
-the gate runs out of time long before it runs out of ideas.
+With `SYSTEMONE_COOLDOWN=1`, every block doubles the wait before the next
+command is judged: 10 ms, 20 ms, 40 ms … with no ceiling. The first nine
+blocks are imperceptible — a few false positives cost nothing. The first
+noticeable pause arrives around block ten (5 s), by block twenty an attempt
+waits 1.5 hours, by block twenty-five almost two days. An agent shopping
+for variants past the gate runs out of time long before it runs out of
+ideas. Without the flag, blocks are plain blocks and nothing escalates.
 
 On top of that, the counter fades with quiet time — one block of memory
 per 30 minutes — so early false positives heal instead of poisoning the
@@ -441,9 +469,7 @@ folder, and register
 `"plugin": ["./plugins/guardrails-md/adapters/opencode.ts"]`. opencode 2
 loads `.opencode/plugins/` on its own but only from a root `index.ts`, so add
 one containing `export { default } from "./adapters/opencode.ts"` instead of
-registering the path. Manual installs
-need `@typesafe-ai/sdk` resolvable (`npm install -g @typesafe-ai/sdk`); the
-npm package brings it as a dependency.
+registering the path. There are no runtime dependencies to resolve.
 
 ## Harness differences
 
@@ -458,8 +484,7 @@ either. What differs is where the gate looks.
 |---|---|---|---|
 | Hook | 1.x `tool.execute.before`: bash judged; `edit`, `write` and `apply_patch` checked against the protected paths. 2.x `tool.hook("execute.before")`: the same for `shell`, `edit`, `write` and `patch` | `tool_call`, including calls a codemode script makes: bash judged; `edit` and `write` checked against the protected paths | hooks module: `tool.call` on `Bash` and on `Monitor` when it runs a `command`; `Edit`, `Write` and `NotebookEdit` checked against the protected paths; `session.start` freezes the policy, the root and the environment |
 | On block | throws; the agent reads the message | returns `{ block, reason }` to the agent and shows a warning to you (on stderr in `pi -p`) | answers `{ deny }`; Claude reads the reason |
-| Without a credential | inactive; one log line with `SYSTEMONE_LOG=1` | inactive; warns you once per session (on stderr in `pi -p`) | inactive; a toast warns you at session start |
-| Seat token | 1.x: `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share`); 2.x: the same file, which 2.x never refreshes; set `BERGET_API_KEY` | pi's Berget login, OAuth or API key, resolved by pi itself; then the OAuth entry in `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent`) | none — `BERGET_API_KEY` (or `TYPESAFE_API_KEY`) only |
+| Without configuration | every command blocked (fail-closed), nothing sent | every command blocked (fail-closed), nothing sent | every command denied (fail-closed); a toast warns you at session start |
 | Policy file | `GUARDRAILS.md`, then `.opencode/GUARDRAILS.md` (lowercase legacy names after) | `GUARDRAILS.md`, then `.pi/GUARDRAILS.md` (lowercase legacy names after) | `GUARDRAILS.md`, then `.claude/GUARDRAILS.md` (lowercase legacy names after) |
 | Policy read from | the project directory opencode passes the plugin | the directory pi was started in | the session's directory, frozen at `session.start` |
 | Audit log | `~/.cache/opencode/systemone-gate.log` | `~/.cache/pi/systemone-gate.log` | not supported (`$.fs` cannot append) |
@@ -480,14 +505,13 @@ Claude Code skips a hook that throws or overruns and lets the call
 through, so the module attaches a `.catch` handler that denies instead:
 the gate fails closed. If `session.start` never ran, every command is
 denied. The endpoint call goes through Claude Code's own `$.http.fetch`:
-when your organization's web-fetch policy refuses `api.berget.ai` (or
-your `BERGET_BASE_URL`), the call fails and the command is denied like
+when your organization's web-fetch policy refuses your
+`SYSTEMONE_BASE_URL`, the call fails and the command is denied like
 any unreachable endpoint (or allowed with `SYSTEMONE_FAIL_OPEN=1`).
-The call times out after 5 s, as the SDK's does in opencode and pi, and a
-timeout is treated like an unreachable endpoint. Unlike the SDK, the module
-makes one attempt with no retry on 429 or 5xx. The `SYSTEMONE_*` and
-`BERGET_*` variables are read once, at `session.start`; changing them takes
-a new session.
+The call times out after 5 s, as it does in opencode and pi, and a
+timeout is treated like an unreachable endpoint. The module makes one
+attempt with no retry on 429 or 5xx. The `SYSTEMONE_*` variables are
+read once, at `session.start`; changing them takes a new session.
 
 `Bash` is gated, and so is `Monitor` when it runs a shell `command` (a
 Monitor watching a WebSocket runs nothing and passes). `PowerShell` is not

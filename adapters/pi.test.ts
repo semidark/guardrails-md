@@ -4,9 +4,17 @@ import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 
-const sdk = await vi.hoisted(async () => (await import("../test/sdk-mock.ts")).createSdkMock())
-vi.mock("@typesafe-ai/sdk", () => sdk.module)
-const { systemOne } = sdk
+const fetchMock = vi.fn()
+
+function mockAnswers(body: unknown) {
+  // Fresh Response per call: a Response body can only be read once.
+  fetchMock.mockImplementation(async () => new Response(JSON.stringify(body), { status: 200 }))
+}
+
+function sentRequest(i = 0): { url: string; body: any; headers: Record<string, string> } {
+  const [url, init] = fetchMock.mock.calls[i] as [string, RequestInit]
+  return { url: String(url), body: JSON.parse(String(init.body)), headers: init.headers as Record<string, string> }
+}
 
 type ToolCall = { type: "tool_call"; toolCallId: string; toolName: string; input: Record<string, unknown>; parentToolCallId?: string }
 type Handler = (event: ToolCall, ctx: unknown) => Promise<{ block: boolean; reason: string } | undefined>
@@ -14,11 +22,12 @@ type Handler = (event: ToolCall, ctx: unknown) => Promise<{ block: boolean; reas
 const allow = { answers: { destructive: { noul: 0.01 }, credentials: { noul: 0 } } }
 const blockDestructive = { answers: { destructive: { noul: 0.98 }, credentials: { noul: 0 } } }
 
+const ENDPOINT = "http://model.lan:8081"
+
 let dir: string
 let home: string
 const notify = vi.fn()
-const getApiKeyForProvider = vi.fn()
-const ctx = { hasUI: true, ui: { notify }, modelRegistry: { getApiKeyForProvider } }
+const ctx = { hasUI: true, ui: { notify } }
 const printCtx = { ...ctx, hasUI: false }
 
 async function loadHandlers(): Promise<Record<string, Handler>> {
@@ -47,13 +56,14 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "gate-home-"))
   dir = mkdtempSync(join(tmpdir(), "gate-proj-"))
   vi.stubEnv("HOME", home)
-  vi.stubEnv("BERGET_API_KEY", "test-key")
-  vi.stubEnv("PI_CODING_AGENT_DIR", undefined)
+  vi.stubEnv("SYSTEMONE_BASE_URL", ENDPOINT)
+  vi.stubEnv("SYSTEMONE_API_KEY", "test-key")
+  vi.stubEnv("SYSTEMONE_MODEL", "test-model")
   vi.stubEnv("SYSTEMONE_GATE", undefined)
+  vi.stubEnv("SYSTEMONE_COOLDOWN", undefined)
+  vi.stubGlobal("fetch", fetchMock)
   vi.spyOn(process, "cwd").mockReturnValue(dir)
-  systemOne.mockResolvedValue(structuredClone(allow))
-  getApiKeyForProvider.mockResolvedValue(undefined)
-  sdk.configs.length = 0
+  mockAnswers(allow)
 })
 
 afterEach(() => {
@@ -65,7 +75,7 @@ afterEach(() => {
 
 describe("pi adapter", () => {
   it("Given a destructive verdict, When bash is called, Then it is blocked with a reason and the human is notified", async () => {
-    systemOne.mockResolvedValue(blockDestructive)
+    mockAnswers(blockDestructive)
     const handler = await loadHandler()
     const result = await handler(bash("rm -rf /data"), ctx)
     expect(result).toMatchObject({ block: true, reason: expect.stringMatching(/destructive=0\.98[\s\S]*restart pi/) })
@@ -78,8 +88,16 @@ describe("pi adapter", () => {
     expect(notify).not.toHaveBeenCalled()
   })
 
+  it("Given a configured endpoint, When bash is called, Then the request goes to it with the bearer key", async () => {
+    const handler = await loadHandler()
+    await handler(bash("ls"), ctx)
+    expect(sentRequest(0).url).toBe(`${ENDPOINT}/v1/systemone`)
+    expect(sentRequest(0).headers.Authorization).toBe("Bearer test-key")
+    expect(sentRequest(0).body.model).toBe("test-model")
+  })
+
   it("Given a codemode script, When it issues a nested bash call, Then that call is judged too", async () => {
-    systemOne.mockResolvedValue(blockDestructive)
+    mockAnswers(blockDestructive)
     const handler = await loadHandler()
     const result = await handler(bash("rm -rf /data", "codemode-1"), ctx)
     expect(result?.block).toBe(true)
@@ -88,22 +106,22 @@ describe("pi adapter", () => {
   it("Given a read tool call, When it is called, Then the model is not asked", async () => {
     const handler = await loadHandler()
     await expect(handler({ type: "tool_call", toolCallId: "c2", toolName: "read", input: { path: "x" } }, ctx)).resolves.toBeUndefined()
-    expect(systemOne).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("Given SYSTEMONE_GATE=off, When bash is called, Then nothing is judged", async () => {
     vi.stubEnv("SYSTEMONE_GATE", "off")
-    systemOne.mockResolvedValue(blockDestructive)
+    mockAnswers(blockDestructive)
     const handler = await loadHandler()
     await expect(handler(bash("rm -rf /"), ctx)).resolves.toBeUndefined()
-    expect(systemOne).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("Given GUARDRAILS.md, When bash is called, Then the canonical file is judged", async () => {
     writeFileSync(join(dir, "GUARDRAILS.md"), "# canonical pi rules")
     const handler = await loadHandler()
     await handler(bash("ls"), ctx)
-    expect(systemOne.mock.calls[0][0].state.text).toContain("# canonical pi rules")
+    expect(sentRequest(0).body.state.text).toContain("# canonical pi rules")
   })
 
   it("Given .pi/guardrails.md at load, When it is edited afterwards, Then the frozen text is judged", async () => {
@@ -112,71 +130,35 @@ describe("pi adapter", () => {
     const handler = await loadHandler()
     writeFileSync(join(dir, ".pi", "guardrails.md"), "# WEAKENED BY AGENT")
     await handler(bash("ls"), ctx)
-    expect(systemOne.mock.calls[0][0].state.text).toContain("# pi rules")
-    expect(systemOne.mock.calls[0][0].state.text).not.toContain("WEAKENED")
+    expect(sentRequest(0).body.state.text).toContain("# pi rules")
+    expect(sentRequest(0).body.state.text).not.toContain("WEAKENED")
   })
 
-  it("Given only a pi Berget login, When bash is called, Then the SDK gets the seat token", async () => {
-    mkdirSync(join(home, ".pi", "agent"), { recursive: true })
-    writeFileSync(join(home, ".pi", "agent", "auth.json"), JSON.stringify({ berget: { type: "oauth", access: "pi-seat", expires: Date.now() + 60_000 } }))
-    vi.stubEnv("BERGET_API_KEY", undefined)
+  it("Given no endpoint configured, When bash is called, Then the call is blocked fail-closed and nothing is sent", async () => {
+    vi.stubEnv("SYSTEMONE_BASE_URL", undefined)
     const handler = await loadHandler()
-    await handler(bash("ls"), ctx)
-    expect(sdk.configs[0]?.apiKey).toBe("pi-seat")
+    const result = await handler(bash("rm -rf /data"), ctx)
+    expect(result).toMatchObject({ block: true, reason: expect.stringMatching(/not configured — SYSTEMONE_BASE_URL missing[\s\S]*fail-closed/) })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it("Given no credential, When bash is called twice, Then the human is warned once that the gate is inactive", async () => {
-    vi.stubEnv("BERGET_API_KEY", undefined)
-    vi.stubEnv("TYPESAFE_API_KEY", undefined)
+  it("Given no API key, When bash is called, Then the call is blocked fail-closed", async () => {
+    vi.stubEnv("SYSTEMONE_API_KEY", undefined)
     const handler = await loadHandler()
-    await expect(handler(bash("rm -rf /data"), ctx)).resolves.toBeUndefined()
-    await handler(bash("ls"), ctx)
-    expect(notify).toHaveBeenCalledTimes(1)
-    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/inactive.*BERGET_API_KEY/), "warning")
-  })
-
-  it("Given a credential, When a call is allowed, Then no inactive warning is shown", async () => {
-    const handler = await loadHandler()
-    await handler(bash("ls"), ctx)
-    expect(notify).not.toHaveBeenCalled()
-  })
-
-  it("Given an empty BERGET_API_KEY and no login, When bash is called, Then the human is warned the gate is inactive", async () => {
-    vi.stubEnv("BERGET_API_KEY", "")
-    vi.stubEnv("TYPESAFE_API_KEY", undefined)
-    const handler = await loadHandler()
-    await handler(bash("ls"), ctx)
-    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/inactive/), "warning")
+    const result = await handler(bash("ls"), ctx)
+    expect(result).toMatchObject({ block: true, reason: expect.stringMatching(/not configured — SYSTEMONE_API_KEY missing/) })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("Given the endpoint is down, When bash is called, Then the call is blocked (fail-closed)", async () => {
-    systemOne.mockRejectedValue(new Error("gateway down"))
+    fetchMock.mockRejectedValue(new Error("gateway down"))
     const handler = await loadHandler()
     await expect(handler(bash("ls"), ctx)).resolves.toMatchObject({ block: true, reason: expect.stringMatching(/endpoint unreachable/) })
   })
 
-  it("Given a pi API-key login for Berget, When bash is called, Then the SDK gets the key pi resolves", async () => {
-    getApiKeyForProvider.mockResolvedValue("pi-api-key")
-    vi.stubEnv("BERGET_API_KEY", undefined)
-    vi.stubEnv("TYPESAFE_API_KEY", undefined)
-    const handler = await loadHandler()
-    await handler(bash("ls"), ctx)
-    expect(getApiKeyForProvider).toHaveBeenCalledWith("berget")
-    expect(sdk.configs[0]?.apiKey).toBe("pi-api-key")
-  })
-
-  it("Given a pi-resolved key, When bash is called, Then no inactive warning is shown", async () => {
-    getApiKeyForProvider.mockResolvedValue("pi-api-key")
-    vi.stubEnv("BERGET_API_KEY", undefined)
-    vi.stubEnv("TYPESAFE_API_KEY", undefined)
-    const handler = await loadHandler()
-    await handler(bash("ls"), ctx)
-    expect(notify).not.toHaveBeenCalled()
-  })
-
   it("Given print mode without UI, When a command is blocked, Then the warning goes to stderr", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true)
-    systemOne.mockResolvedValue(blockDestructive)
+    mockAnswers(blockDestructive)
     const handler = await loadHandler()
     const result = await handler(bash("rm -rf /data"), printCtx)
     expect(result?.block).toBe(true)
@@ -184,13 +166,12 @@ describe("pi adapter", () => {
     expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/^SystemOne-gate: blocked command/))
   })
 
-  it("Given print mode and no credential, When bash is called, Then the inactive warning goes to stderr", async () => {
+  it("Given print mode and no endpoint, When bash is called, Then the fail-closed reason goes to stderr", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true)
-    vi.stubEnv("BERGET_API_KEY", undefined)
-    vi.stubEnv("TYPESAFE_API_KEY", undefined)
+    vi.stubEnv("SYSTEMONE_BASE_URL", undefined)
     const handler = await loadHandler()
     await handler(bash("ls"), printCtx)
-    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/inactive/))
+    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/not configured/))
   })
 
   it("Given an invalid SYSTEMONE_THRESHOLD, When a session starts, Then the human is warned", async () => {
@@ -207,17 +188,6 @@ describe("pi adapter", () => {
     await sessionStart({ type: "session_start" }, printCtx)
     expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/SYSTEMONE_THRESHOLD/))
   })
-
-  it("Given PI_CODING_AGENT_DIR, When bash is called, Then the seat token is read from there", async () => {
-    const agentDir = join(home, "custom-agent")
-    mkdirSync(agentDir, { recursive: true })
-    writeFileSync(join(agentDir, "auth.json"), JSON.stringify({ berget: { type: "oauth", access: "custom-seat", expires: Date.now() + 60_000 } }))
-    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir)
-    vi.stubEnv("BERGET_API_KEY", undefined)
-    const handler = await loadHandler()
-    await handler(bash("ls"), ctx)
-    expect(sdk.configs[0]?.apiKey).toBe("custom-seat")
-  })
 })
 
 describe("pi adapter: protected paths", () => {
@@ -233,7 +203,7 @@ describe("pi adapter: protected paths", () => {
     const result = await handler(editCall(join(dir, "guardrails.md")), ctx)
     expect(result).toMatchObject({ block: true, reason: expect.stringMatching(/protected file — GUARDRAILS\.md[\s\S]*restart pi/) })
     expect(notify).toHaveBeenCalledWith(expect.stringMatching(/^SystemOne-gate: protected file/), "warning")
-    expect(systemOne).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("Given a write under .pi/, When it is called, Then it is blocked", async () => {
@@ -241,7 +211,7 @@ describe("pi adapter: protected paths", () => {
     const result = await handler(writeCall(join(dir, ".pi", "tool.ts")), ctx)
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain("protected file — .pi/")
-    expect(systemOne).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("Given an edit on @guardrails.md, When pi strips the @ prefix, Then it is blocked", async () => {
@@ -272,17 +242,18 @@ describe("pi adapter: protected paths", () => {
   it("Given an edit on a plain source file, When it is called, Then it passes and the human is not warned", async () => {
     const handler = await loadHandler()
     await expect(handler(editCall(join(dir, "src", "a.ts")), ctx)).resolves.toBeUndefined()
-    expect(systemOne).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
     expect(notify).not.toHaveBeenCalled()
   })
 
-  it("Given no Berget credential, When an edit on guardrails.md is called, Then it is still blocked", async () => {
-    vi.stubEnv("BERGET_API_KEY", undefined)
-    vi.stubEnv("TYPESAFE_API_KEY", undefined)
+  it("Given no endpoint configured, When an edit on guardrails.md is called, Then it is still blocked", async () => {
+    vi.stubEnv("SYSTEMONE_BASE_URL", undefined)
+    vi.stubEnv("SYSTEMONE_API_KEY", undefined)
+    vi.stubEnv("SYSTEMONE_MODEL", undefined)
     const handler = await loadHandler()
     const result = await handler(editCall(join(dir, "guardrails.md")), ctx)
     expect(result?.block).toBe(true)
-    expect(systemOne).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("Given SYSTEMONE_GATE=off, When an edit on guardrails.md is called, Then it passes", async () => {

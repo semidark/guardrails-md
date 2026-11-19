@@ -45,4 +45,4 @@ jobs:
       # RESOLVE relative imports — a plain parse accepts an adapter even when
       # ../core.ts is missing.
       - name: Parse + import-resolution check
-        run: npx --yes esbuild --bundle adapters/opencode.ts adapters/pi.ts hooks/register.ts --outdir=/tmp/parse-check --platform=node --format=esm --external:@typesafe-ai/sdk --external:@opencode-ai/plugin --external:@earendil-works/pi-coding-agent "--external:node:*"
+        run: npx --yes esbuild --bundle adapters/opencode.ts adapters/pi.ts hooks/register.ts --outdir=/tmp/parse-check --platform=node --format=esm --external:@opencode-ai/plugin --external:@earendil-works/pi-coding-agent "--external:node:*"

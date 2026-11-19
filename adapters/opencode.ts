@@ -11,7 +11,8 @@
  * Config warnings (bad threshold, truncated GUARDRAILS.md) are a toast at load
  * on 1.x; 2.x has no toast API, so there they only reach the block reasons.
  *
- * Seat token: opencode 1.x auth storage, maintained by @bergetai/opencode-auth.
+ * Endpoint: SYSTEMONE_BASE_URL / SYSTEMONE_API_KEY / SYSTEMONE_MODEL — your
+ * self-hosted System One model. No vendor fallback: unset means blocked.
  * Guardrails: GUARDRAILS.md or .opencode/GUARDRAILS.md (legacy lowercase names
  * are still read), frozen at plugin load.
  * Log: ~/.cache/opencode/systemone-gate.log (SYSTEMONE_LOG=1).
@@ -27,7 +28,6 @@ function opencode(): Harness {
   const home = process.env.HOME
   return {
     name: "opencode",
-    authPath: `${process.env.XDG_DATA_HOME ?? `${home}/.local/share`}/opencode/auth.json`,
     guardrailPaths: ["GUARDRAILS.md", ".opencode/GUARDRAILS.md", "guardrails.md", ".opencode/guardrails.md"],
     logPath: `${home}/.cache/opencode/systemone-gate.log`,
   }
@@ -79,7 +79,7 @@ const server = (async ({ directory, client }) => {
 }) satisfies V1Plugin
 
 export default {
-  id: "@bergetai/guardrails-md",
+  id: "guardrails-md",
   async setup(ctx) {
     const gate = createGate(opencode(), ctx.location.directory)
     await ctx.tool.hook("execute.before", (event) => guard(gate, event.tool, event.input as Args))

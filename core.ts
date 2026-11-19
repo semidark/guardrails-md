@@ -1,11 +1,11 @@
 /**
  * guardrails-md core — judges a bash command before it runs, using a System
- * One decision model (TypeSafe Jev contract) via the official
- * @typesafe-ai/sdk client. Harness-free: adapters/ wires it into opencode
- * and pi, each passing a Harness with its own paths and wording.
+ * One decision model at a self-hosted endpoint. Harness-free: adapters/
+ * wires it into opencode and pi, each passing a Harness with its own paths
+ * and wording.
  *
  * Flow: createGate() freezes GUARDRAILS.md → check(command) answers all
- * questions in one forward pass (~100 ms) → a reason above threshold, else
+ * questions in one forward pass → a reason above threshold, else
  * null. checkPath(path) is the deterministic backstop in front of that:
  * writes to protected paths (the policy, the harness config, CI workflows)
  * are refused — no model call, no threshold, no cooldown — so a session
@@ -16,26 +16,30 @@
  *   credentials          — contains/leaks secrets, keys, tokens?
  *   guardrails_violation — violates the team's GUARDRAILS.md? (if present)
  *
- * Credentials, in order: the harness's Berget seat token, then
- * BERGET_API_KEY, then the SDK's TYPESAFE_API_KEY. Endpoints: defaults to
- * Berget's hosted System One API (api.berget.ai, model berget/bev). Any
- * other System One-compatible gateway works via BERGET_BASE_URL/BERGET_MODEL.
+ * Self-hosted only — no vendor defaults. The endpoint, key and model must
+ * be configured explicitly: SYSTEMONE_BASE_URL, SYSTEMONE_API_KEY and
+ * SYSTEMONE_MODEL. There is no fallback URL anywhere in this codebase: if
+ * any of them is missing, every command is blocked (fail-closed) and no
+ * request is made. All traffic goes to the operator's own System
+ * One-compatible endpoint and nowhere else.
  *
  * Block > 0.7. Fail-CLOSED on endpoint errors: an unreachable endpoint
  * blocks commands (fail-open would be an agent-reachable kill switch —
- * it can induce the failure). SYSTEMONE_FAIL_OPEN=1 opts out.
+ * it can induce the failure). SYSTEMONE_FAIL_OPEN=1 opts out, for
+ * transient endpoint failures only; missing configuration always blocks.
  *
- * Config: BERGET_API_KEY, BERGET_BASE_URL, BERGET_MODEL (fallback: the SDK's
- * TYPESAFE_* vars), SYSTEMONE_THRESHOLD (0.7), SYSTEMONE_FAIL_OPEN=1,
- * SYSTEMONE_GATE=off, SYSTEMONE_LOG=1.
+ * The circumvention cooldown is opt-in (SYSTEMONE_COOLDOWN=1): off by
+ * default, blocks carry no escalating wait.
+ *
+ * Config: SYSTEMONE_BASE_URL, SYSTEMONE_API_KEY, SYSTEMONE_MODEL (all
+ * required), SYSTEMONE_THRESHOLD (0.7), SYSTEMONE_FAIL_OPEN=1,
+ * SYSTEMONE_GATE=off, SYSTEMONE_COOLDOWN=1, SYSTEMONE_LOG=1.
  */
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join } from "node:path"
-import { noul, TypeSafeClient } from "@typesafe-ai/sdk"
 
 export interface Harness {
   name: "opencode" | "pi"
-  authPath: string
   guardrailPaths: string[]
   logPath: string
 }
@@ -43,6 +47,7 @@ export interface Harness {
 export type Block = { reason: string }
 
 const DEFAULT_THRESHOLD = 0.7
+const TIMEOUT_MS = 5000
 
 // Out-of-range values fail silently otherwise: "abc" (NaN) or anything ≥ 1
 // never blocks, while "", 0 or negatives block everything.
@@ -63,11 +68,14 @@ const THRESHOLD = threshold.value
 // Endpoint failure policy. Default is FAIL-CLOSED: if the endpoint cannot
 // be reached, the command is blocked. Fail-open would be an agent-reachable
 // kill switch — an agent can induce the failure (hammer the endpoint until
-// rate-limited, exhaust the account quota) and then run anything unchecked.
-// The SDK already retries transient 429/529 with backoff, so a persistent
-// failure here is real. Interactive users who prefer availability over
-// strictness can set SYSTEMONE_FAIL_OPEN=1.
+// rate-limited) and then run anything unchecked. Interactive users who
+// prefer availability over strictness can set SYSTEMONE_FAIL_OPEN=1. It
+// applies to endpoint errors only — never to missing configuration, which
+// always blocks.
 const FAIL_OPEN = /^(1|true|yes)$/i.test(process.env.SYSTEMONE_FAIL_OPEN ?? "")
+// Escalating circumvention cooldown. Off by default: blocks are plain
+// blocks. SYSTEMONE_COOLDOWN=1 turns the doubling backoff on.
+const COOLDOWN = /^(1|true|yes)$/i.test(process.env.SYSTEMONE_COOLDOWN ?? "")
 const GUARDRAILS_MAX = 2000 // chars — keep the state text tight
 const TRUNCATED = "\n… (truncated)"
 const SCRIPT_MAX = 4000 // chars of file content included per file
@@ -204,60 +212,78 @@ export function readGuardrails(directory: string, paths: string[]): string | nul
   return null
 }
 
-// --- System One client -------------------------------------------------------
-// The SDK wants the API ROOT (it appends /v1/systemone); accept both forms.
+// --- System One endpoint -----------------------------------------------------
+// The endpoint wants the API ROOT (we append /v1/systemone); accept both forms.
 export function gatewayRoot(url: string | undefined): string | undefined {
   if (!url) return undefined
   return url.replace(/\/v1\/systemone\/?$/, "").replace(/\/+$/, "")
 }
 
-// Berget seat token from the harness's auth storage. Read per request so a
-// mid-session refresh is picked up. Returns null when absent or expired.
-function readSeatAuth(authPath: string): { access: string; expires: number } | null {
-  try {
-    const auth = JSON.parse(readFileSync(authPath, "utf8"))?.berget
-    if (auth?.type !== "oauth" || typeof auth.access !== "string" || !auth.access) return null
-    return { access: auth.access, expires: Number(auth.expires) }
-  } catch {
-    return null
+export interface EndpointConfig {
+  baseURL: string
+  apiKey: string
+  model: string
+}
+
+// The names of the required variables that are unset or blank. The gate is
+// only live when this list is empty — there is no default endpoint, so a
+// half-configured gate blocks instead of silently going inactive.
+export function missingConfig(): string[] {
+  const missing: string[] = []
+  if (!process.env.SYSTEMONE_BASE_URL?.trim()) missing.push("SYSTEMONE_BASE_URL")
+  if (!process.env.SYSTEMONE_API_KEY?.trim()) missing.push("SYSTEMONE_API_KEY")
+  if (!process.env.SYSTEMONE_MODEL?.trim()) missing.push("SYSTEMONE_MODEL")
+  return missing
+}
+
+export function endpointConfig(): EndpointConfig | null {
+  if (missingConfig().length > 0) return null
+  return {
+    baseURL: gatewayRoot(process.env.SYSTEMONE_BASE_URL!.trim()) as string,
+    apiKey: process.env.SYSTEMONE_API_KEY!.trim(),
+    model: process.env.SYSTEMONE_MODEL!.trim(),
   }
 }
 
-function isStale(expires: number): boolean {
-  return Number.isFinite(expires) && expires > 0 && expires < Date.now()
+// The noul question shape, inlined: the wire JSON without a package import.
+function noul(instructions: string) {
+  return { type: "noul" as const, instructions }
 }
 
-export function seatToken(authPath: string): string | null {
-  const auth = readSeatAuth(authPath)
-  if (!auth || isStale(auth.expires)) return null // stale: let the API key take over
-  return auth.access
-}
-
-// A harness that resolves credentials itself (pi's own login store) passes
-// the key in; it wins over reading the harness's auth file directly.
-function apiKey(authPath: string, resolvedKey?: string): string | undefined {
-  return resolvedKey || (seatToken(authPath) ?? process.env.BERGET_API_KEY ?? process.env.TYPESAFE_API_KEY)
-}
-
-function newClient(key: string | undefined): TypeSafeClient | null {
-  if (!key) return null
-  return new TypeSafeClient({
-    apiKey: key,
-    baseURL: gatewayRoot(
-      process.env.BERGET_BASE_URL ?? process.env.TYPESAFE_BASE_URL ?? "https://api.berget.ai",
-    ),
-    defaultModel: process.env.BERGET_MODEL ?? process.env.TYPESAFE_DEFAULT_MODEL ?? "berget/bev",
-    timeout: 5000,
+// One forward pass to the self-hosted model. Plain fetch, no SDK: the wire
+// contract lives here and nowhere else, and the only host it can reach is
+// the one the operator configured.
+async function callEndpoint(
+  cfg: EndpointConfig,
+  state: string,
+  questions: Record<string, ReturnType<typeof noul>>,
+): Promise<unknown> {
+  const res = await fetch(`${cfg.baseURL}/v1/systemone`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${cfg.apiKey}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ state: { text: state }, questions, model: cfg.model }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   })
+  if (!res.ok) {
+    const body = await res.text().catch(() => "")
+    throw Object.assign(new Error(`System One endpoint answered ${res.status}: ${body.slice(0, 120)}`), {
+      status: res.status,
+    })
+  }
+  return res.json()
 }
 
-interface JudgeContext {
-  client: TypeSafeClient
+export interface JudgeContext {
+  cfg: EndpointConfig
   command: string
   guardrails: string | null
 }
 
-export async function judge({ client, command, guardrails }: JudgeContext): Promise<Verdict> {
+export async function judge({ cfg, command, guardrails }: JudgeContext): Promise<Verdict> {
   const stateParts = [`Command the agent wants to run:\n${command}`]
   const scripts = scriptContents(command)
   if (scripts) {
@@ -290,8 +316,10 @@ export async function judge({ client, command, guardrails }: JudgeContext): Prom
         "General or vague permissions do not count as an exception.",
     )
   }
-  const response = await client.systemOne({ state: { text: stateParts.join("\n\n") }, questions })
-  const a = response.answers as Record<string, { noul?: number }>
+  const response = (await callEndpoint(cfg, stateParts.join("\n\n"), questions)) as {
+    answers?: Record<string, { noul?: number }>
+  }
+  const a = (response.answers ?? {}) as Record<string, { noul?: number }>
   return {
     destructive: a.destructive?.noul ?? 0,
     credentials: a.credentials?.noul ?? 0,
@@ -338,12 +366,12 @@ function log(path: string, entry: Record<string, unknown>) {
   } catch {}
 }
 
-// Circumvention cooldown: every block doubles the wait before the next
-// command is judged — 10 ms, 20 ms, 40 ms … with no ceiling. The first
-// nine blocks are imperceptible (a few false positives cost nothing);
-// the first noticeable pause arrives around block ten (5 s), and by
-// block twenty an attempt waits 1.5 h, by block twenty-five almost two
-// days: brute-forcing variants past the gate is arithmetically hopeless.
+// Circumvention cooldown (opt-in, SYSTEMONE_COOLDOWN=1): every block doubles
+// the wait before the next command is judged — 10 ms, 20 ms, 40 ms … with no
+// ceiling. The first nine blocks are imperceptible (a few false positives
+// cost nothing); the first noticeable pause arrives around block ten (5 s),
+// and by block twenty an attempt waits 1.5 h, by block twenty-five almost
+// two days: brute-forcing variants past the gate is arithmetically hopeless.
 //
 // The wait is enforced as a visible cooldown block, not a silent sleep —
 // an invisible hang looks like a crash, while the reason tells the agent
@@ -373,8 +401,8 @@ function formatWait(remainingMs: number): string {
 }
 
 function endpointReason(status: number | undefined): string {
-  if (status === 402) return "Berget account out of credit — top up at berget.ai"
-  if (status === 401) return "authentication failed — re-login to Berget or check BERGET_API_KEY"
+  if (status === 401) return "authentication failed — check SYSTEMONE_API_KEY"
+  if (status === 402) return "the endpoint refused the request: payment required (402)"
   if (status === 429) return "rate limited — wait a moment and retry"
   return "endpoint unreachable"
 }
@@ -458,7 +486,6 @@ export function createGate(harness: Harness, directory: string) {
   let blockCount = 0
   let lastBlockAt = 0
   let cooldownUntil = 0
-  let loggedInactive = false
 
   function effectiveBlocks(now: number): number {
     if (blockCount === 0 || lastBlockAt === 0) return 0
@@ -483,34 +510,33 @@ export function createGate(harness: Harness, directory: string) {
     }
   }
 
-  // Credentials resolve lazily: the seat token can appear or be refreshed
-  // mid-session.
-  function resolveClient(resolvedKey?: string): TypeSafeClient | null {
-    const client = newClient(apiKey(harness.authPath, resolvedKey))
-    if (client) return client
-    if (!loggedInactive) {
-      log(harness.logPath, {
-        ts: new Date().toISOString(),
-        note: "gate inactive: no seat token, BERGET_API_KEY or TYPESAFE_API_KEY",
-      })
-      loggedInactive = true
-    }
-    return null
-  }
-
-  async function check(command: string, resolvedKey?: string): Promise<Block | null> {
-    const block = await judgeCommand(command, resolvedKey)
+  async function check(command: string): Promise<Block | null> {
+    const block = await judgeCommand(command)
     if (!block || warnings.length === 0) return block
     return { reason: [block.reason, ...warnings.map((w) => `  ${w}`)].join("\n") }
   }
 
-  async function judgeCommand(command: string, resolvedKey?: string): Promise<Block | null> {
+  async function judgeCommand(command: string): Promise<Block | null> {
     if (process.env.SYSTEMONE_GATE === "off") return null
-    const client = resolveClient(resolvedKey)
-    if (!client) return null
     if (!command) return null
-    const cooling = cooldownBlock()
-    if (cooling) return cooling
+    // No endpoint, no pass. The gate never runs without a fully configured
+    // self-hosted endpoint, and FAIL_OPEN does not cover this — a missing
+    // configuration is an operator error, not a transient failure, and
+    // silently going inactive would let commands run with no judge at all.
+    const missing = missingConfig()
+    if (missing.length > 0) {
+      log(harness.logPath, {
+        ts: new Date().toISOString(),
+        command,
+        decision: "BLOCK",
+        note: `not configured: ${missing.join(", ")}`,
+      })
+      return { reason: notConfiguredReason(missing, harness.name) }
+    }
+    if (COOLDOWN) {
+      const cooling = cooldownBlock()
+      if (cooling) return cooling
+    }
 
     // Every command is judged — no fast path of any kind. Prefix
     // allowlists ("it starts with ls, let it through") are exactly the
@@ -521,7 +547,7 @@ export function createGate(harness: Harness, directory: string) {
 
     let verdict: Verdict
     try {
-      verdict = await judge({ client, command, guardrails })
+      verdict = await judge({ cfg: endpointConfig() as EndpointConfig, command, guardrails })
     } catch (err) {
       const decision = FAIL_OPEN ? "fail-open" : "fail-closed"
       log(harness.logPath, { ts: new Date().toISOString(), command, error: String(err), decision })
@@ -536,7 +562,7 @@ export function createGate(harness: Harness, directory: string) {
     }
 
     const outcome = decide(verdict, hasGuardrails)
-    if (outcome.decision === "BLOCK") registerBlock()
+    if (outcome.decision === "BLOCK" && COOLDOWN) registerBlock()
     log(harness.logPath, {
       ts: new Date().toISOString(),
       command,
@@ -545,7 +571,7 @@ export function createGate(harness: Harness, directory: string) {
       namedException: outcome.named,
       decision: outcome.decision,
       blockCount,
-      cooldownMs: outcome.decision === "BLOCK" ? backoffMs(blockCount) : 0,
+      cooldownMs: outcome.decision === "BLOCK" && COOLDOWN ? backoffMs(blockCount) : 0,
     })
     if (outcome.decision === "allow") return null
     return { reason: blockMessage(outcome, hasGuardrails, harness.name) + `\n  ${command.slice(0, 200)}` }
@@ -566,9 +592,14 @@ export function createGate(harness: Harness, directory: string) {
     return { reason: [reason, ...warnings.map((w) => `  ${w}`)].join("\n") }
   }
 
-  function hasCredential(resolvedKey?: string): boolean {
-    return !!apiKey(harness.authPath, resolvedKey)
-  }
+  return { check, checkPath, warnings }
+}
 
-  return { check, checkPath, hasCredential, warnings }
+function notConfiguredReason(missing: string[], harness: string): string {
+  return (
+    `SystemOne-gate: not configured — ${missing.join(", ")} missing. Command blocked (fail-closed).\n` +
+    `  Point the gate at your self-hosted System One endpoint: set SYSTEMONE_BASE_URL,\n` +
+    `  SYSTEMONE_API_KEY and SYSTEMONE_MODEL, then restart ${harness}.\n` +
+    `  To disable the gate entirely, restart ${harness} with SYSTEMONE_GATE=off.`
+  )
 }
