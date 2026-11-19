@@ -234,6 +234,23 @@ explanation the agent can read; below it, it runs. With any of the three
 variables missing, every command is blocked (fail-closed) and nothing is
 sent.
 
+### Runtime toggle (opencode 2)
+
+The opencode 2 TUI exposes a command to pause model judging for the current
+project location when you need to run something the gate would otherwise
+refuse:
+
+- Run `/guardrails` (or pick **Guardrails gate** from the `ctrl+p` palette) to
+  toggle it. Turning it off asks for confirmation.
+- `/guardrails on` and `/guardrails off` set the state directly.
+- While off, the prompt footer shows `⚠ gate off`.
+- The switch lives in memory and resets to enabled when opencode restarts.
+- Protected files (`GUARDRAILS.md`, `opencode.jsonc`, `.opencode/`, etc.) stay
+  strictly protected even while the gate is off.
+- The gate blocks agent commands that attempt to reach the switch over the
+  server's RPC endpoint: the switch belongs to the human at the TUI, not to
+  the agent it constrains.
+
 ## Git pre-commit hook
 
 The same judgement works as a git pre-commit hook: every commit's staged

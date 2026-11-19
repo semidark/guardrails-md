@@ -16,10 +16,15 @@
  * Guardrails: GUARDRAILS.md or .opencode/GUARDRAILS.md (legacy lowercase names
  * are still read), frozen at plugin load.
  * Log: ~/.cache/opencode/systemone-gate.log (SYSTEMONE_LOG=1).
+ *
+ * Runtime switch (2.x only): the TUI part toggles model judging per project
+ * location over the GateRpc contract. It starts on and resets to on whenever
+ * the plugin loads; protected paths stay enforced while it is off.
  */
 import type { Plugin as V1Plugin } from "@opencode-ai/plugin"
 import type { Plugin as V2 } from "@opencode/plugin"
-import { createGate, type Harness } from "../core.ts"
+import { createGate, type Block, type Harness } from "../core.ts"
+import { GATE_RPC_ID, GateRpc } from "./opencode-rpc.ts"
 
 type Gate = ReturnType<typeof createGate>
 type Args = { command?: unknown; filePath?: unknown; path?: unknown; patchText?: unknown } | undefined
@@ -43,9 +48,33 @@ function patchPaths(patchText: string): string[] {
   return paths
 }
 
+// The switch is reachable over the server's HTTP API, which an agent's shell
+// can call too. A command naming it is refused before any model call. Quotes,
+// backslashes, whitespace and %XX escapes are folded first so the obvious
+// spellings of the id cannot slip past; anything cleverer is left to the model.
+export function touchesGateSwitch(command: string): boolean {
+  const flat = command
+    .replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/["'`\\\s]/g, "")
+    .toLowerCase()
+  return flat.includes(GATE_RPC_ID) || /api\/rpc\/[^/]*guardrails/.test(flat)
+}
+
+function switchBlock(command: string): Block {
+  return {
+    reason:
+      `SystemOne-gate: blocked command — it targets the gate's on/off switch.\n` +
+      `  The switch belongs to your human, at the opencode TUI. Ask them if\n` +
+      `  the gate should be paused.\n` +
+      `  ${command.slice(0, 200)}`,
+  }
+}
+
 async function guard(gate: Gate, tool: string, args: Args): Promise<void> {
   if (tool === "bash" || tool === "shell") {
-    const block = await gate.check(String(args?.command ?? "").trim())
+    const command = String(args?.command ?? "").trim()
+    const tampering = process.env.SYSTEMONE_GATE !== "off" && gate.isEnabled() && touchesGateSwitch(command)
+    const block = tampering ? switchBlock(command) : await gate.check(command)
     if (block) throw new Error(block.reason)
     return
   }
@@ -83,6 +112,17 @@ export default {
   async setup(ctx) {
     const gate = createGate(opencode(), ctx.location.directory)
     await ctx.tool.hook("execute.before", (event) => guard(gate, event.tool, event.input as Args))
+    if (!ctx.rpc?.register) return
+    // Handlers must return promises: opencode 2.3.2 calls .then on the result.
+    const registration = await ctx.rpc.register(GateRpc, {
+      status: async () => ({ enabled: gate.isEnabled() }),
+      setEnabled: async (input) => {
+        gate.setEnabled((input as { enabled: boolean }).enabled === true)
+        const state = { enabled: gate.isEnabled() }
+        await registration.events.emit("changed", state)
+        return state
+      },
+    })
   },
   server,
 } satisfies V2.Plugin & { server: V1Plugin }

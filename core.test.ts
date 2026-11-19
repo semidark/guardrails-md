@@ -738,4 +738,32 @@ describe("audit log (opt-in)", () => {
     expect(line.note).toContain("SYSTEMONE_API_KEY")
     expect(fetchMock).not.toHaveBeenCalled()
   })
+  it("logs commands that pass unjudged while the runtime switch is off", async () => {
+    const gate = await makeGate({ SYSTEMONE_LOG: "1" })
+    gate.setEnabled(false)
+    await expect(gate.check("rm -rf /data")).resolves.toBeNull()
+    const line = JSON.parse(readFileSync(join(home, ".cache", "opencode", "systemone-gate.log"), "utf8").trim())
+    expect(line).toMatchObject({ command: "rm -rf /data", decision: "skipped" })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("runtime switch", () => {
+  it("Given a new gate, When asked, Then it is enabled", async () => {
+    const gate = await makeGate()
+    expect(gate.isEnabled()).toBe(true)
+  })
+
+  it("Given the switch is off, When the configuration is missing, Then the command still passes without a request", async () => {
+    const gate = await makeGate({ SYSTEMONE_BASE_URL: undefined })
+    gate.setEnabled(false)
+    await expect(gate.check("ls")).resolves.toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("Given the switch is off, When a protected path is checked, Then it is still refused", async () => {
+    const gate = await makeGate()
+    gate.setEnabled(false)
+    expect(gate.checkPath(join(dir, "GUARDRAILS.md"))).not.toBeNull()
+  })
 })

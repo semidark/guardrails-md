@@ -265,3 +265,98 @@ describe("opencode 2 adapter", () => {
     await expect(hook({ tool: "edit", input: { path: join(dir, "src", "a.ts") } })).resolves.toBeUndefined()
   })
 })
+
+type Handlers = {
+  status: () => Promise<{ enabled: boolean }>
+  setEnabled: (input: unknown) => Promise<{ enabled: boolean }>
+}
+
+async function setupV2WithRpc() {
+  const mod = await import("./opencode.ts")
+  const rpcModule = await import("./opencode-rpc.ts")
+  const hook = vi.fn().mockResolvedValue({ dispose: async () => {} })
+  const emit = vi.fn().mockResolvedValue(undefined)
+  const register = vi.fn().mockResolvedValue({ events: { emit }, dispose: async () => {} })
+  await mod.default.setup({ location: { directory: dir }, tool: { hook }, rpc: { register } } as never)
+  return {
+    hook: hook.mock.calls[0][1] as V2Hook,
+    register,
+    emit,
+    handlers: register.mock.calls[0][1] as Handlers,
+    GateRpc: rpcModule.GateRpc,
+  }
+}
+
+describe("opencode 2 adapter: runtime switch", () => {
+  it("Given opencode 2 with RPC, When setup runs, Then the gate contract is registered and starts enabled", async () => {
+    const { register, handlers, GateRpc } = await setupV2WithRpc()
+    expect(register).toHaveBeenCalledWith(GateRpc, expect.any(Object))
+    expect(handlers.status()).toBeInstanceOf(Promise)
+    await expect(handlers.status()).resolves.toEqual({ enabled: true })
+  })
+
+  it("Given the switch turned off, When shell runs, Then the model is not asked and the command passes", async () => {
+    mockAnswers(blockDestructive)
+    const { hook, handlers } = await setupV2WithRpc()
+    await expect(handlers.setEnabled({ enabled: false })).resolves.toEqual({ enabled: false })
+    await expect(hook({ tool: "shell", input: { command: "rm -rf /data" } })).resolves.toBeUndefined()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("Given the switch turned off, When an edit on GUARDRAILS.md runs, Then protected paths still refuse it", async () => {
+    const { hook, handlers } = await setupV2WithRpc()
+    await handlers.setEnabled({ enabled: false })
+    await expect(hook({ tool: "edit", input: { path: join(dir, "GUARDRAILS.md") } })).rejects.toThrow(/protected file/)
+  })
+
+  it("Given the switch turned off and on again, When shell runs, Then the model judges again", async () => {
+    mockAnswers(blockDestructive)
+    const { hook, handlers } = await setupV2WithRpc()
+    await handlers.setEnabled({ enabled: false })
+    await handlers.setEnabled({ enabled: true })
+    await expect(hook({ tool: "shell", input: { command: "rm -rf /data" } })).rejects.toThrow(/destructive=0\.98/)
+  })
+
+  it("Given a switch change, When it is applied, Then a changed event carries the new state", async () => {
+    const { handlers, emit } = await setupV2WithRpc()
+    await handlers.setEnabled({ enabled: false })
+    expect(emit).toHaveBeenCalledWith("changed", { enabled: false })
+  })
+
+  it("Given the RPC contract, When its methods are read, Then every method declares an input schema", async () => {
+    const { GateRpc } = await setupV2WithRpc()
+    for (const method of Object.values(GateRpc.methods)) expect(method.input).toBeTypeOf("object")
+  })
+
+  it("Given a fresh plugin load after the switch was off, When status is read, Then it is enabled again", async () => {
+    const first = await setupV2WithRpc()
+    await first.handlers.setEnabled({ enabled: false })
+    const second = await setupV2WithRpc()
+    await expect(second.handlers.status()).resolves.toEqual({ enabled: true })
+  })
+
+  it.each([
+    "opencode api post /api/rpc/guardrails-md-gate/setEnabled -d '{\"input\":{\"enabled\":false}}'",
+    "curl -X POST localhost:4096/api/rpc/guardrails%2Dmd%2Dgate/setEnabled",
+    "curl localhost:4096/api/rpc/guard\"\"rails-md-gate/setEnabled",
+    "curl localhost:4096/api/rpc/guardrails-md/setEnabled",
+  ])("Given an agent command that targets the switch (%s), When shell runs, Then it is refused without asking the model", async (command) => {
+    const hook = await loadV2Hook()
+    await expect(hook({ tool: "shell", input: { command } })).rejects.toThrow(/on\/off switch/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("Given an ordinary command in the guardrails-md repo, When shell runs, Then it is judged normally", async () => {
+    const hook = await loadV2Hook()
+    await expect(hook({ tool: "shell", input: { command: "cd ~/src/guardrails-md && git status" } })).resolves.toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("Given SYSTEMONE_GATE=off, When a command targets the switch, Then it passes like every other command", async () => {
+    vi.stubEnv("SYSTEMONE_GATE", "off")
+    const hook = await loadV2Hook()
+    await expect(
+      hook({ tool: "shell", input: { command: "opencode api post /api/rpc/guardrails-md-gate/status" } }),
+    ).resolves.toBeUndefined()
+  })
+})

@@ -7,12 +7,17 @@
     ".": "./adapters/opencode.ts",
     "./opencode": "./adapters/opencode.ts",
     "./server": "./adapters/opencode.ts",
+    "./tui": "./adapters/opencode-tui.ts",
+    "./rpc": "./adapters/opencode-rpc.ts",
     "./pi": "./adapters/pi.ts"
   },
   "files": [
     "core.ts",
     "plugin/index.ts",
+    "plugin/tui.ts",
     "adapters/opencode.ts",
+    "adapters/opencode-rpc.ts",
+    "adapters/opencode-tui.ts",
     "adapters/pi.ts",
     ".claude-plugin/plugin.json",
     "hooks/hooks.json",

@@ -486,6 +486,9 @@ export function createGate(harness: Harness, directory: string) {
   let blockCount = 0
   let lastBlockAt = 0
   let cooldownUntil = 0
+  // The human's runtime switch (opencode 2 TUI). In memory only: every new
+  // gate starts enabled, so a restart or plugin reload turns judging back on.
+  let enabled = true
 
   function effectiveBlocks(now: number): number {
     if (blockCount === 0 || lastBlockAt === 0) return 0
@@ -519,6 +522,10 @@ export function createGate(harness: Harness, directory: string) {
   async function judgeCommand(command: string): Promise<Block | null> {
     if (process.env.SYSTEMONE_GATE === "off") return null
     if (!command) return null
+    if (!enabled) {
+      log(harness.logPath, { ts: new Date().toISOString(), command, decision: "skipped", note: "gate disabled by the user" })
+      return null
+    }
     // No endpoint, no pass. The gate never runs without a fully configured
     // self-hosted endpoint, and FAIL_OPEN does not cover this — a missing
     // configuration is an operator error, not a transient failure, and
@@ -579,7 +586,8 @@ export function createGate(harness: Harness, directory: string) {
 
   // A rule, not a verdict: no endpoint call, no threshold, and the cooldown
   // counter is untouched — an agent that retries a refused edit pays nothing,
-  // it simply never gets to write the file. Honours SYSTEMONE_GATE=off.
+  // it simply never gets to write the file. Honours SYSTEMONE_GATE=off, but
+  // not the runtime switch: that only pauses the model, not this rule.
   function checkPath(path: string): Block | null {
     if (process.env.SYSTEMONE_GATE === "off") return null
     const hit = protectedPath(directory, path)
@@ -592,7 +600,15 @@ export function createGate(harness: Harness, directory: string) {
     return { reason: [reason, ...warnings.map((w) => `  ${w}`)].join("\n") }
   }
 
-  return { check, checkPath, warnings }
+  return {
+    check,
+    checkPath,
+    warnings,
+    isEnabled: () => enabled,
+    setEnabled: (value: boolean) => {
+      enabled = value
+    },
+  }
 }
 
 function notConfiguredReason(missing: string[], harness: string): string {
