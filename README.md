@@ -152,16 +152,37 @@ install it from a local clone or a git URL.
 
 ### opencode
 
-Add the plugin to `opencode.json` (global or per project). From a local
-clone, point at the adapter path; opencode 2 reads the `plugins` key:
+For OpenCode V2, add the fork as a Git package in
+`~/.config/opencode/opencode.jsonc` (global) or `opencode.jsonc` (per project).
+Pin a full commit hash for reproducible deployment; this is the tested
+self-hosted implementation revision:
 
 ```json
 {
-  "plugins": ["/home/you/src/guardrails-md/adapters/opencode.ts"]
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["github:semidark/guardrails-md#eb2df00f3ae5e906b35f252a9319fb7e1e513d4f"]
 }
 ```
 
-opencode 1.x reads `plugin` instead:
+OpenCode installs the package into its managed cache and loads the adapter
+through the fork's `package.json` exports. No npm publication, local clone,
+vendored copy, git submodule, or loader shim is needed. Missing packages install
+in the background, so verify installation with `opencode plugin list` and the
+server log before relying on the gate. Config changes reload automatically.
+
+To update, push the new implementation to the fork and replace the pinned full
+commit hash in your config. Exact hashes do not automatically advance.
+
+For local development, V2 also accepts the **clone directory**, whose package
+exports point at the adapter (not a path to a single `.ts` file):
+
+```json
+{
+  "plugins": ["/home/you/src/guardrails-md"]
+}
+```
+
+Legacy opencode 1.x reads `plugin` and accepts the adapter file path:
 
 ```json
 {
@@ -198,7 +219,8 @@ them between releases.
 ### Endpoint and key
 
 Set the three required variables (see [Endpoint setup](#endpoint-setup))
-and restart the harness — plugins and extensions load at startup:
+and restart the harness/server process so it inherits the new environment
+(OpenCode config changes alone do not update an existing process's environment):
 
 ```sh
 export SYSTEMONE_BASE_URL=http://llama-cpp.internal:8081
@@ -461,15 +483,12 @@ Verdicts you disagree with can be reviewed there and fed back as training
 data for the next fine-tune. The log holds whatever your commands hold, so
 treat it as sensitive.
 
-Manual install for opencode: copy [`core.ts`](core.ts) and
-[`adapters/opencode.ts`](adapters/opencode.ts) into
-`~/.config/opencode/plugins/guardrails-md/` (global) or
-`.opencode/plugins/guardrails-md/` (per project), keeping the `adapters/`
-folder, and register
-`"plugin": ["./plugins/guardrails-md/adapters/opencode.ts"]`. opencode 2
-loads `.opencode/plugins/` on its own but only from a root `index.ts`, so add
-one containing `export { default } from "./adapters/opencode.ts"` instead of
-registering the path. There are no runtime dependencies to resolve.
+For OpenCode installation, use the [pinned Git package configuration](#opencode)
+above. Keep code changes in the fork rather than copying runtime files into your
+dotfiles. If migrating from an older vendored or shim deployment, move the old
+`~/.config/opencode/plugins/guardrails-md/` directory outside the discovered
+plugins directory after confirming the Git package has loaded, to avoid loading
+both versions. Removing a chezmoi source file does not delete an orphaned target.
 
 ## Harness differences
 
