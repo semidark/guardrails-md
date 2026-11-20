@@ -22,9 +22,9 @@ describe("package metadata", () => {
 
   it("Given opencode 2 loads a package's TUI part from exports[\"./tui\"], When package.json is checked, Then it points at the TUI switch and ships it", () => {
     const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "package.json"), "utf8"))
-    expect(pkg.exports["./tui"]).toBe("./adapters/opencode-tui.tsx")
+    expect(pkg.exports["./tui"]).toBe("./adapters/opencode-tui.ts")
     expect(pkg.exports["./rpc"]).toBe("./adapters/opencode-rpc.ts")
-    expect(pkg.files).toEqual(expect.arrayContaining(["adapters/opencode-tui.tsx", "adapters/opencode-rpc.ts"]))
+    expect(pkg.files).toEqual(expect.arrayContaining(["adapters/opencode-tui.ts", "adapters/opencode-rpc.ts"]))
   })
 })
 
@@ -33,7 +33,7 @@ describe("self-hosted fork: no vendor code paths", () => {
     "core.ts",
     "adapters/opencode.ts",
     "adapters/opencode-rpc.ts",
-    "adapters/opencode-tui.tsx",
+    "adapters/opencode-tui.ts",
     "adapters/pi.ts",
     "hooks/hooks.json",
     "hooks/register.ts",

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import plugin, { parseSwitchArgument } from "./opencode-tui.tsx"
+import plugin, { parseSwitchArgument } from "./opencode-tui.ts"
 import { GateRpc } from "./opencode-rpc.ts"
 
 type Command = { id: string; title: string; palette: boolean; slash: { name: string }; run: (input?: string) => Promise<void> }

@@ -10,10 +10,14 @@
  * contract and mirrors the answer.
  *
  * A plain object of the shape Plugin.define returns, so the package keeps no
- * runtime dependency on @opencode/plugin. opencode compiles the JSX for the
- * TUI itself; a slot render must return an element, not a bare string.
+ * runtime dependency on @opencode/plugin. Slot elements are built through
+ * @opentui/solid/jsx-runtime (injected by opencode's runtime module loader for
+ * both local and node_modules plugins) so this file works inside node_modules
+ * without a compile step.
  */
 import type { Plugin } from "@opencode/plugin/tui"
+// @ts-expect-error provided at runtime by opencode's bun-plugin-opentui-runtime-modules
+import { jsx } from "@opentui/solid/jsx-runtime"
 import { GateRpc } from "./opencode-rpc.ts"
 
 type Context = Plugin.Context
@@ -103,11 +107,11 @@ export default {
 
     const stopSlot = context.ui.slot({
       append: "prompt.footer.status",
-      render: () => (
-        <text fg={state.enabled ? context.theme.text.feedback.success.base : context.theme.text.feedback.warning.base}>
-          {state.enabled ? "⛨ gate on" : "⚠ gate off"}
-        </text>
-      ),
+      render: () =>
+        jsx("text", {
+          fg: state.enabled ? context.theme.text.feedback.success.base : context.theme.text.feedback.warning.base,
+          children: state.enabled ? "⛨ gate on" : "⚠ gate off",
+        }),
     })
 
     const stopEvents = gate().events.on("changed", (event) => {

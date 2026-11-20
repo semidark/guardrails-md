@@ -1,1 +1,1 @@
-export { default } from "../adapters/opencode-tui.tsx"
+export { default } from "../adapters/opencode-tui.ts"
