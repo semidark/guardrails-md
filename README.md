@@ -416,7 +416,7 @@ sandboxes and human review still matter.
 - It fails closed. If the endpoint is unreachable the command is blocked
   until the endpoint responds again. That is deliberate: with fail-open, an
   agent could induce the failure itself and then run anything unchecked.
-  Each call gets one attempt with a 5 s timeout; a persistent failure
+  Each call gets one attempt with a 10 s timeout; a persistent failure
   blocks, and the agent relays the error. Interactive users who prefer
   availability can set `SYSTEMONE_FAIL_OPEN=1`, knowingly. Missing
   configuration is never fail-open — it always blocks.

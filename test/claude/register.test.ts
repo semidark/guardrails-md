@@ -165,10 +165,10 @@ describe("guardrails-md mod", () => {
     await start($)
     const pending = bash($, "ls")
     await w.clock.advance(0)
-    await w.clock.advance(5000)
+    await w.clock.advance(10_000)
     const out = await pending
     expect(out.deny).toContain("endpoint unreachable — command blocked")
-    expect(out.deny).toContain("timed out after 5000 ms")
+    expect(out.deny).toContain("timed out after 10000 ms")
     expect(w.ran).toEqual([])
   })
 

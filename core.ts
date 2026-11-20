@@ -47,7 +47,7 @@ export interface Harness {
 export type Block = { reason: string }
 
 const DEFAULT_THRESHOLD = 0.7
-const TIMEOUT_MS = 5000
+const TIMEOUT_MS = 10_000
 
 // Out-of-range values fail silently otherwise: "abc" (NaN) or anything ≥ 1
 // never blocks, while "", 0 or negatives block everything.

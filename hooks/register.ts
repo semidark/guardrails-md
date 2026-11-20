@@ -46,7 +46,7 @@ const PROTECTED_PATHS = [
   ".claude/settings.local.json",
   ".github/workflows/",
 ]
-const TIMEOUT_MS = 5000
+const TIMEOUT_MS = 10_000
 const DEFAULT_THRESHOLD = 0.7
 const GUARDRAILS_MAX = 2000 // chars — keep the state text tight
 const TRUNCATED = "\n… (truncated)"
