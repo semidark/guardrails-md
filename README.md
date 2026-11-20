@@ -243,7 +243,8 @@ refuse:
 - Run `/guardrails` (or pick **Guardrails gate** from the `ctrl+p` palette) to
   toggle it. Turning it off asks for confirmation.
 - `/guardrails on` and `/guardrails off` set the state directly.
-- While off, the prompt footer shows `⚠ gate off`.
+- The prompt footer always carries a status icon: green `⛨ gate on` while
+  judging runs, warning `⚠ gate off` while paused.
 - The switch lives in memory and resets to enabled when opencode restarts.
 - Protected files (`GUARDRAILS.md`, `opencode.jsonc`, `.opencode/`, etc.) stay
   strictly protected even while the gate is off.

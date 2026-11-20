@@ -3,8 +3,9 @@
  *
  * `/guardrails` (also in the command palette) toggles model judging for the
  * current project location; `/guardrails on` and `/guardrails off` set it.
- * Turning it off asks for confirmation, and the prompt footer shows a warning
- * while it is off. The server part owns the state, starts enabled and resets
+ * Turning it off asks for confirmation, and the prompt footer carries a status
+ * icon: green ⛨ gate on while judging runs, warning ⚠ gate off while paused.
+ * The server part owns the state, starts enabled and resets
  * to enabled when opencode restarts — this file only asks it over the GateRpc
  * contract and mirrors the answer.
  *
@@ -102,15 +103,11 @@ export default {
 
     const stopSlot = context.ui.slot({
       append: "prompt.footer.status",
-      // Solid/OpenTUI element factory without JSX so this file needs no JSX
-      // transform or React runtime at test time. opencode accepts { type, props }.
-      render: () => ({
-        type: "text",
-        props: {
-          fg: context.theme.text.feedback.warning.base,
-          children: state.enabled ? "" : "⚠ gate off",
-        },
-      }),
+      render: () => (
+        <text fg={state.enabled ? context.theme.text.feedback.success.base : context.theme.text.feedback.warning.base}>
+          {state.enabled ? "⛨ gate on" : "⚠ gate off"}
+        </text>
+      ),
     })
 
     const stopEvents = gate().events.on("changed", (event) => {

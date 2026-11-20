@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import plugin, { parseSwitchArgument } from "./opencode-tui.ts"
+import plugin, { parseSwitchArgument } from "./opencode-tui.tsx"
 import { GateRpc } from "./opencode-rpc.ts"
 
 type Command = { id: string; title: string; palette: boolean; slash: { name: string }; run: (input?: string) => Promise<void> }
@@ -29,7 +29,7 @@ function fakeContext(serverEnabled = true) {
   const layers: Layer[] = []
   const slot = vi.fn(() => () => {})
   const context = {
-    theme: { text: { feedback: { warning: { base: "yellow" } } } },
+    theme: { text: { feedback: { success: { base: "green" }, warning: { base: "yellow" } } } },
     location: LOCATION,
     data: { location: { default: () => LOCATION } },
     client: { rpc },
@@ -50,6 +50,8 @@ function fakeContext(serverEnabled = true) {
     setEnabled,
     rpc,
     command: () => layers[0]().commands[0],
+    footerIcon: () =>
+      (slot.mock.calls[0][0] as { render: () => { type: string; props: { fg: string; children: string } } }).render(),
     emitChanged: (event: unknown) => changed?.(event),
   }
 }
@@ -153,6 +155,18 @@ describe("opencode TUI switch", () => {
     expect(fake.store.enabled).toBe(true)
     fake.emitChanged({ location: LOCATION, data: { enabled: false } })
     expect(fake.store.enabled).toBe(false)
+  })
+
+  it("Given the gate is on, When the footer renders, Then a green shield icon shows it", async () => {
+    const fake = fakeContext()
+    await load(fake)
+    expect(fake.footerIcon()).toEqual({ type: "text", props: { fg: "green", children: "⛨ gate on" } })
+  })
+
+  it("Given the gate is off, When the footer renders, Then a warning icon shows it", async () => {
+    const fake = fakeContext(false)
+    await load(fake)
+    expect(fake.footerIcon()).toEqual({ type: "text", props: { fg: "yellow", children: "⚠ gate off" } })
   })
 
   it("Given a server restart reset the gate to on, When the refresh interval passes, Then the TUI shows it on", async () => {

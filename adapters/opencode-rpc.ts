@@ -1,6 +1,6 @@
 /**
  * RPC contract between the opencode 2 server part (adapters/opencode.ts) and
- * the TUI toggle (adapters/opencode-tui.ts). A plain object of the shape
+ * the TUI toggle (adapters/opencode-tui.tsx). A plain object of the shape
  * Rpc.define returns — that function only validates error names — so the
  * package keeps no runtime dependency on @opencode/plugin.
  *
