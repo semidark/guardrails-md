@@ -109,7 +109,10 @@ export default {
       append: "prompt.footer.status",
       render: () =>
         jsx("text", {
+          flexShrink: 0,
+          wrapMode: "none",
           fg: state.enabled ? context.theme.text.feedback.success.base : context.theme.text.feedback.warning.base,
+          onMouseUp: () => void run(),
           children: state.enabled ? "⛨ gate on" : "⚠ gate off",
         }),
     })

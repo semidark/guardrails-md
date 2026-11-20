@@ -51,7 +51,11 @@ function fakeContext(serverEnabled = true) {
     rpc,
     command: () => layers[0]().commands[0],
     footerIcon: () =>
-      (slot.mock.calls[0][0] as { render: () => { type: string; props: { fg: string; children: string } } }).render(),
+      (
+        slot.mock.calls[0][0] as {
+          render: () => { type: string; props: { fg: string; children: string; onMouseUp: () => void } }
+        }
+      ).render(),
     emitChanged: (event: unknown) => changed?.(event),
   }
 }
@@ -160,13 +164,23 @@ describe("opencode TUI switch", () => {
   it("Given the gate is on, When the footer renders, Then a green shield icon shows it", async () => {
     const fake = fakeContext()
     await load(fake)
-    expect(fake.footerIcon()).toEqual({ type: "text", props: { fg: "green", children: "⛨ gate on" } })
+    expect(fake.footerIcon()).toMatchObject({ type: "text", props: { fg: "green", children: "⛨ gate on" } })
   })
 
   it("Given the gate is off, When the footer renders, Then a warning icon shows it", async () => {
     const fake = fakeContext(false)
     await load(fake)
-    expect(fake.footerIcon()).toEqual({ type: "text", props: { fg: "yellow", children: "⚠ gate off" } })
+    expect(fake.footerIcon()).toMatchObject({ type: "text", props: { fg: "yellow", children: "⚠ gate off" } })
+  })
+
+  it("Given the footer icon is clicked with the mouse, When confirmed, Then the gate toggles", async () => {
+    const fake = fakeContext()
+    await load(fake)
+    fake.footerIcon().props.onMouseUp()
+    await vi.runOnlyPendingTimersAsync()
+    expect(fake.context.ui.dialog.confirm).toHaveBeenCalledTimes(1)
+    expect(fake.setEnabled).toHaveBeenCalledWith({ enabled: false }, { location: LOCATION })
+    expect(fake.store.enabled).toBe(false)
   })
 
   it("Given a server restart reset the gate to on, When the refresh interval passes, Then the TUI shows it on", async () => {
